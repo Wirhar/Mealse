@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Выберите, как это устройство будет подключаться к узлу."
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="16dp" />
+
+        <RadioGroup
+            android:id="@+id/rg_node_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp">
+
+            <!-- AUTO -->
+            <RadioButton
+                android:id="@+id/rb_mode_auto"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Авто"
+                android:textSize="15sp"
+                android:textColor="#2D3748"
+                android:checked="true"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="  Пробуем по порядку: Wi-Fi Direct → IPv6 → STUN → локальная сеть → шлюз"
+                android:textSize="12sp"
+                android:textColor="#718096"
+                android:layout_marginBottom="12dp" />
+
+            <!-- DIRECT -->
+            <RadioButton
+                android:id="@+id/rb_mode_direct"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Только напрямую"
+                android:textSize="15sp"
+                android:textColor="#2D3748"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="  Только P2P: IPv6, STUN или локальная сеть. Шлюз не используется."
+                android:textSize="12sp"
+                android:textColor="#718096"
+                android:layout_marginBottom="12dp" />
+
+            <!-- GATEWAY -->
+            <RadioButton
+                android:id="@+id/rb_mode_gateway"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Через шлюз"
+                android:textSize="15sp"
+                android:textColor="#2D3748"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="  Всегда через указанный шлюз. Работает даже в 4G, если шлюз с белым IP."
+                android:textSize="12sp"
+                android:textColor="#718096"
+                android:layout_marginBottom="12dp" />
+
+            <!-- ★ НОВОЕ: WIFI_DIRECT -->
+            <RadioButton
+                android:id="@+id/rb_mode_wifi_direct"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Wi-Fi Direct"
+                android:textSize="15sp"
+                android:textColor="#2D3748"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="  Прямое соединение без роутера. Устройства должны быть рядом."
+                android:textSize="12sp"
+                android:textColor="#718096"
+                android:layout_marginBottom="12dp" />
+
+        </RadioGroup>
+
+        <!-- Поля шлюза (только для GATEWAY) -->
+        <LinearLayout
+            android:id="@+id/gateway_fields"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            android:padding="12dp"
+            android:background="#EDF2F7">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="IP шлюза"
+                android:textSize="13sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <EditText
+                android:id="@+id/edit_gateway_ip"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="#FFFFFF"
+                android:padding="12dp"
+                android:hint="192.168.1.148"
+                android:inputType="textUri"
+                android:textSize="14sp"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Порт шлюза"
+                android:textSize="13sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <EditText
+                android:id="@+id/edit_gateway_port"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="#FFFFFF"
+                android:padding="12dp"
+                android:hint="8083"
+                android:inputType="number"
+                android:text="8083"
+                android:textSize="14sp"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="⚠ Шлюз должен быть доступен из вашей сети. Если шлюз за роутером — на нём должен быть проброс порта, а также белый IP или динамический DNS."
+                android:textSize="11sp"
+                android:textColor="#DD6B20"
+                android:paddingTop="4dp" />
+
+        </LinearLayout>
+
+        <!-- Подсказка -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Подсказка: Wi-Fi Direct работает только когда устройства физически рядом (до ~100 м). Если рядом — выбирайте «Wi-Fi Direct» или «Авто». Если нет — «Авто» или «Через шлюз»."
+            android:textSize="11sp"
+            android:textColor="#A0AEC0"
+            android:layout_marginTop="12dp" />
+
+    </LinearLayout>
+</ScrollView>

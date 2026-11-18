@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="20dp"
+    android:background="#FFFFFF">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Добавить устройство вручную"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="#2D3748"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Имя устройства"
+        android:textSize="14sp"
+        android:textColor="#4A5568"
+        android:layout_marginBottom="4dp" />
+
+    <EditText
+        android:id="@+id/edit_node_name"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="#EDF2F7"
+        android:padding="12dp"
+        android:hint="Например: Домашний сервер"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="IP-адрес"
+        android:textSize="14sp"
+        android:textColor="#4A5568"
+        android:layout_marginBottom="4dp" />
+
+    <EditText
+        android:id="@+id/edit_node_ip"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:inputType="textUri"
+        android:background="#EDF2F7"
+        android:padding="12dp"
+        android:hint="192.168.1.10"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Порт"
+        android:textSize="14sp"
+        android:textColor="#4A5568"
+        android:layout_marginBottom="4dp" />
+
+    <EditText
+        android:id="@+id/edit_node_port"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:inputType="number"
+        android:background="#EDF2F7"
+        android:padding="12dp"
+        android:hint="8081"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="ID устройства (опционально)"
+        android:textSize="14sp"
+        android:textColor="#718096"
+        android:layout_marginBottom="4dp" />
+
+    <EditText
+        android:id="@+id/edit_device_id"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="#EDF2F7"
+        android:padding="12dp"
+        android:hint="Уникальный ID"
+        android:layout_marginBottom="16dp" />
+    
+    <!-- ★ НОВОЕ: IPv6 узла -->
+<TextView
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:text="Публичный IPv6 узла (опционально)"
+    android:textSize="14sp"
+    android:textColor="#4A5568"
+    android:layout_marginBottom="4dp" />
+
+<EditText
+    android:id="@+id/edit_node_ipv6"
+    android:layout_width="match_parent"
+    android:layout_height="48dp"
+    android:background="#EDF2F7"
+    android:padding="12dp"
+    android:hint="2a00:1234:5678::1"
+    android:inputType="textUri"
+    android:fontFamily="monospace"
+    android:layout_marginBottom="16dp" />
+
+<!-- ★ НОВОЕ: IPv6 шлюза -->
+<TextView
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:text="Публичный IPv6 шлюза (опционально)"
+    android:textSize="14sp"
+    android:textColor="#4A5568"
+    android:layout_marginBottom="4dp" />
+
+<EditText
+    android:id="@+id/edit_gateway_ipv6"
+    android:layout_width="match_parent"
+    android:layout_height="48dp"
+    android:background="#EDF2F7"
+    android:padding="12dp"
+    android:hint="2a00:1234:5678::2"
+    android:inputType="textUri"
+    android:fontFamily="monospace"
+    android:layout_marginBottom="16dp" />
+
+    <!-- ★ НОВОЕ: подсказка про режим -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Режим подключения (Авто / Напрямую / Через шлюз) настраивается отдельно: Действия с узлом → Настроить режим."
+        android:textSize="11sp"
+        android:textColor="#A0AEC0"
+        android:layout_marginBottom="12dp" />
+
+    <Button
+        android:id="@+id/btn_add_node"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Добавить устройство"
+        android:backgroundTint="#4C51BF"
+        android:textColor="#FFFFFF" />
+
+</LinearLayout>

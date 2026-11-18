@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#1E1E1E">
+
+    <!-- Toolbar -->
+    <android.widget.Toolbar
+        android:id="@+id/fm_toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="#16213E"
+        android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar"
+        app:popupTheme="@style/ThemeOverlay.AppCompat.Dark"
+        app:title="Файлы"
+        app:titleTextColor="#FFFFFF" />
+
+    <!-- Блок выбора источника -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#232946"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Источник:"
+            android:textColor="#A0AEC0"
+            android:textSize="13sp" />
+
+        <Spinner
+            android:id="@+id/fm_source_spinner"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:background="@android:color/transparent"
+            android:spinnerMode="dropdown" />
+
+    </LinearLayout>
+
+    <!-- Текущий путь + кнопка «вверх» -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#2D2D2D"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        app:tint="#A0AEC0">
+
+        <ImageButton
+            android:id="@+id/fm_btn_up"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_arrow_up"
+            android:contentDescription="Вверх"
+            android:scaleType="centerInside" />
+
+        <TextView
+            android:id="@+id/fm_current_path"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:text="…"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:maxLines="1"
+            android:ellipsize="start" />
+
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#444444" />
+
+    <!-- Список файлов + empty view -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <ListView
+            android:id="@+id/fm_list"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="#333333"
+            android:dividerHeight="1dp"
+            android:background="#1E1E1E"
+            android:choiceMode="multipleChoice"
+            android:listSelector="@android:color/transparent" />
+
+        <TextView
+            android:id="@+id/fm_empty"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:textSize="16sp"
+            android:textColor="#888"
+            android:text="📂 Папка пуста"
+            android:visibility="gone" />
+
+        <ProgressBar
+            android:id="@+id/fm_loading"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+</LinearLayout>nearLayout>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:paddingStart="8dp"
+    android:paddingEnd="8dp"
+    android:paddingTop="12dp"
+    android:paddingBottom="8dp"
+    android:background="#232946">
+
+    <TextView
+        android:id="@+id/dfa_header"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="8dp"
+        android:text="Узлы с доступом к файлам"
+        android:textColor="#A0AEC0"
+        android:textSize="13sp" />
+
+    <ListView
+        android:id="@+id/dfa_list"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxHeight="360dp"
+        android:divider="#333333"
+        android:dividerHeight="1dp"
+        android:background="@android:color/transparent" />
+
+    <TextView
+        android:id="@+id/dfa_empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="24dp"
+        android:gravity="center"
+        android:text="Нет разрешённых узлов"
+        android:textColor="#A0AEC0"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
+</LinearLayout>

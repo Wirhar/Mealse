@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ============================================================
+         Базовая тема приложения (см. AndroidManifest.xml).
+         Используется MainActivity, SettingsActivity, TunnelActivity,
+         WifiDirectActivity, IncomingCallActivity.
+
+         ★ РЕВИЗИЯ: убран DarkActionBar, включён NoActionBar
+         (все эти активности не используют ActionBar — у них своя
+         шапка или Toolbar). Statusbar закрашен цветом colorPrimaryVariant,
+         контент не заезжает под системную строку.
+
+         На Android 15+ (SDK 35/36) система принудительно включает
+         edge-to-edge. Для корректного отображения в Activity.onCreate()
+         используется applyWindowInsets() через BaseActivity
+         (см. BaseActivity.java). Это единственный способ, который
+         работает и на API 29, и на API 35+.
+         ============================================================ -->
+    <style name="Theme.MyApplication" parent="Theme.MaterialComponents.DayNight.NoActionBar"> 
+        <!-- Primary brand color -->
+        <item name="colorPrimary">@color/purple_500</item>
+        <item name="colorPrimaryVariant">@color/purple_700</item>
+        <item name="colorOnPrimary">@color/white</item>
+
+        <!-- Secondary brand color -->
+        <item name="colorSecondary">@color/teal_200</item>
+        <item name="colorSecondaryVariant">@color/teal_700</item>
+        <item name="colorOnSecondary">@color/black</item>
+
+        <!-- Status bar: цвет задаём явно, чтобы не было прозрачности -->
+        <item name="android:statusBarColor" tools:targetApi="l">@color/purple_700</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+
+        <!-- ★ Защита от edge-to-edge на Android 15+:
+             явно выключаем "рисовать под статус-баром".
+             На API 29–34 игнорируется, на 35+ переопределяет системное
+             поведение (пока не убран этот флаг). -->
+        <item name="android:windowDrawsSystemBarBackgrounds" tools:targetApi="l">true</item>
+        <item name="android:windowTranslucentStatus" tools:targetApi="l">false</item>
+    </style>
+
+    <!-- ============================================================
+         ★ НОВАЯ: Тема для Fullscreen-активностей.
+         Используется CallActivity (WebRTC-звонок),
+         MAS_VideoPlayerActivity (видео), ImagePreviewActivity (фото).
+
+         Контент занимает весь экран, статус-бар и навбар скрыты.
+         ============================================================ -->
+    <style name="Theme.Mealse.Fullscreen" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+
+        <!-- Тёмный фон, чтобы не мигало белым при старте -->
+        <item name="android:windowBackground">@android:color/black</item>
+
+        <!-- Цвет системных иконок: белый на чёрном -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+    </style>
+
+    <!-- ============================================================
+         Устаревшая AppCompat-тема. Оставлена для обратной совместимости.
+         ★ РЕВИЗИЯ: убраны windowTranslucentStatus и windowActionBarOverlay —
+         они и были причиной "заезда под статус-бар".
+         ============================================================ -->
+    <style name="AppTheme" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">@color/colorPrimary</item>
+        <item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+        <item name="colorAccent">@color/colorAccent</item>
+        <!-- ★ УБРАНО: windowTranslucentStatus=true -->
+        <!-- ★ УБРАНО: windowActionBarOverlay=true -->
+        <!-- ★ УБРАНО: windowActionBarOverlay (appcompat) -->
+    </style>
+
+    <!-- ============================================================
+         Тема для файлового менеджера и других экранов с Toolbar.
+         Без ActionBar → setSupportActionBar(toolbar) работает.
+
+         ★ РЕВИЗИЯ: добавлен windowLightStatusBar=false (иконки белые,
+         чтобы читались на тёмном фоне #0F3460), и явная защита
+         от edge-to-edge на Android 15+.
+         ============================================================ -->
+    <style name="Theme.Mealse.FileManager" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+
+        <item name="colorPrimary">#16213E</item>
+        <item name="colorPrimaryVariant">#0F3460</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#4C51BF</item>
+
+        <item name="android:statusBarColor" tools:targetApi="l">#0F3460</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+        <item name="android:windowBackground">#1E1E1E</item>
+
+        <!-- ★ Защита от edge-to-edge -->
+        <item name="android:windowDrawsSystemBarBackgrounds" tools:targetApi="l">true</item>
+        <item name="android:windowTranslucentStatus" tools:targetApi="l">false</item>
+    </style>
+    
+    <!-- ★ НОВАЯ: тема без ActionBar для активностей, где шапка своя в разметке. -->
+<style name="Theme.Mealse.NoActionBar" parent="Theme.MyApplication">
+    <item name="windowActionBar">false</item>
+    <item name="windowNoTitle">true</item>
+</style>
+
+</resources>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ============================================================
+         Кастомная кнопка-акцент. Используется редко.
+         ============================================================ -->
+    <style name="PrimaryActionButton" parent="Theme.AppCompat.Light">
+        <item name="colorAccent">@color/colorPrimary</item>
+    </style>
+
+    <!-- ============================================================
+         Тема текстового редактора (MAS_TextEditor).
+         Без ActionBar, тёмный фон, monospace.
+
+         ★ РЕВИЗИЯ: добавлен windowLightStatusBar=false (иконки белые,
+         чтобы читались на тёмном фоне #0f3460), и явная защита
+         от edge-to-edge на Android 15+.
+         ============================================================ -->
+    <style name="TextEditorTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+
+        <item name="colorPrimary">#16213e</item>
+        <item name="colorPrimaryDark">#0f3460</item>
+        <item name="colorAccent">#4285f4</item>
+
+        <item name="android:windowBackground">#1a1a2e</item>
+        <item name="android:statusBarColor" tools:targetApi="l">#0f3460</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+
+        <!-- ★ Защита от edge-to-edge -->
+        <item name="android:windowDrawsSystemBarBackgrounds" tools:targetApi="l">true</item>
+        <item name="android:windowTranslucentStatus" tools:targetApi="l">false</item>
+    </style>
+
+</resources>

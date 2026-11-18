@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Mealse — Видеосвязь</title>
+  <style>
+    body, html {
+      margin: 0; padding: 0;
+      background: #000;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+    #localVideo {
+      position: absolute; top: 20px; right: 20px;
+      width: 120px; height: 160px;
+      background: #333;
+      border: 2px solid #4C51BF;
+      border-radius: 12px;
+      z-index: 100;
+      transform: scaleX(-1);
+    }
+    #remoteVideo {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%;
+      object-fit: cover;
+    }
+
+    /* ★ Кнопка переключения камеры — поверх верхней части localVideo, без фона. */
+    #switchCameraBtn {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      width: 120px;              /* как localVideo */
+      height: 40px;              /* верхняя полоска */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #FFFFFF;
+      font-size: 26px;
+      line-height: 1;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+      z-index: 110;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      pointer-events: auto;
+      transition: transform 0.1s ease, opacity 0.15s ease;
+    }
+    #switchCameraBtn:active {
+      transform: scale(0.9);
+      opacity: 0.7;
+    }
+    #switchCameraBtn.switching {
+      opacity: 0.4;
+      pointer-events: none;
+    }
+
+    #controls {
+      position: absolute; bottom: 40px;
+      width: 100%; text-align: center;
+      z-index: 100;
+    }
+    button {
+      background: #4C51BF; color: white;
+      border: none; padding: 12px 24px;
+      margin: 0 8px; border-radius: 30px;
+      font-size: 16px; outline: none;
+    }
+    #endCall { background: #E53E3E; }
+  </style>
+</head>
+<body>
+  <video id="remoteVideo" autoplay playsinline></video>
+  <video id="localVideo" autoplay muted playsinline></video>
+
+  <div id="switchCameraBtn" title="Переключить камеру">⟳</div>
+
+  <div id="controls">
+    <button id="toggleAudio">Микрофон</button>
+    <button id="endCall">Завершить</button>
+    <button id="toggleVideo">Камера</button>
+  </div>
+
+  <script>
+    // ================ Состояние ================
+    let localStream = null;
+    let peerConnection = null;
+    let isIncomingMode = false;
+    let initialized = false;
+    let initializing = false;
+
+    let pendingOffer = null;
+    let pendingCandidates = [];
+    let remoteDescriptionSet = false;
+
+    let iceRestartAttempts = 0;
+    let iceRestartInProgress = false;
+    let iceRestartLockoutTimer = null;
+    let maxIceRestartAttempts = 3;
+    const ICE_RESTART_LOCKOUT_MS = 10000;
+
+    let statsInterval = null;
+    let statsSampleCount = 0;
+    const STATS_INTERVAL_MS = 3000;
+    let lastStats = null;
+
+    let iceMode = 'AUTO';
+    let gatewayIp = '';
+    let gatewayPort = 0;
+
+    let currentFacingMode = 'user';
+    let cameraSwitching = false;
+
+    // ================ DOM ================
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    // ★ #status УДАЛЁН — statusEl больше не нужен.
+
+    // ================ ICE-серверы ================
+    let iceServers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+
+    // ================ Утилиты ================
+    /**
+     * ★ ИЗМЕНЕНО: раньше показывало текст на экране (в #status).
+     * Теперь #status нет — только лог в console/logcat.
+     */
+    function setStatus(text) {
+      console.log('[STATUS]', text);
+    }
+
+    function log(msg) {
+      console.log('[LOG]', msg);
+      if (window.android && window.android.onLog) {
+        try { window.android.onLog(msg); } catch (e) {}
+      }
+    }
+
+    function fmtBytes(b) {
+      if (b < 1024) return b + ' B';
+      if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
+      return (b / 1024 / 1024).toFixed(2) + ' MB';
+    }
+
+    function getCandidateType(candidateStr) {
+      if (!candidateStr) return 'unknown';
+      if (candidateStr.indexOf('typ host') !== -1) return 'host';
+      if (candidateStr.indexOf('typ srflx') !== -1) return 'srflx';
+      if (candidateStr.indexOf('typ prflx') !== -1) return 'prflx';
+      if (candidateStr.indexOf('typ relay') !== -1) return 'relay';
+      return 'unknown';
+    }
+
+    // ================ Java-интерфейс ================
+
+    window.configureIce = function(jsonString) {
+      try {
+        const cfg = JSON.parse(jsonString);
+        const servers = [];
+        if (cfg.stun && Array.isArray(cfg.stun)) {
+          cfg.stun.forEach(url => servers.push({ urls: url }));
+        }
+        if (cfg.turn && cfg.turn.url) {
+          servers.push({
+            urls: cfg.turn.url,
+            username: cfg.turn.username || '',
+            credential: cfg.turn.credential || ''
+          });
+        }
+        if (cfg.turns && Array.isArray(cfg.turns)) {
+          cfg.turns.forEach(t => {
+            if (t && t.url) {
+              servers.push({
+                urls: t.url,
+                username: t.username || '',
+                credential: t.credential || ''
+              });
+            }
+          });
+        }
+        if (servers.length > 0) {
+          iceServers = servers;
+        }
+        log('configureIce: ' + JSON.stringify(iceServers));
+        setStatus('ICE: ' + iceServers.length + ' сервер(ов)');
+      } catch (e) {
+        log('configureIce error: ' + e.message);
+      }
+    };
+
+    window.configureIceMode = function(mode, gwIp, gwPort) {
+      try {
+        iceMode = (mode || 'AUTO').toUpperCase();
+        gatewayIp = gwIp || '';
+        gatewayPort = (typeof gwPort === 'number') ? gwPort : 0;
+
+        log('════════ configureIceMode ════════');
+        log('  mode=' + iceMode);
+        log('  gatewayIp=' + gatewayIp);
+        log('  gatewayPort=' + gatewayPort);
+        log('  iceServers до коррекции: ' + JSON.stringify(iceServers));
+
+        if (iceMode === 'GATEWAY') {
+          iceServers = [];
+          log('  → GATEWAY: iceServers очищены (используем только host)');
+          setStatus('Режим: через шлюз (VPN)');
+        } else if (iceMode === 'DIRECT') {
+          log('  → DIRECT: используем P2P (STUN/host), шлюз отключён');
+          setStatus('Режим: прямое подключение');
+        } else if (iceMode === 'WIFI_DIRECT') {
+          log('  → WIFI_DIRECT: используем host (прямой Wi-Fi)');
+          setStatus('Режим: Wi-Fi Direct');
+        } else {
+          log('  → AUTO: пробуем IPv6 → STUN → host → шлюз');
+          setStatus('Режим: авто');
+        }
+
+        log('  iceServers после коррекции: ' + JSON.stringify(iceServers));
+        log('═══════════════════════════════════');
+
+      } catch (e) {
+        log('configureIceMode error: ' + e.message);
+      }
+    };
+
+    window.setIncomingMode = function(incoming) {
+      isIncomingMode = incoming;
+      log('setIncomingMode=' + incoming + ', iceMode=' + iceMode);
+      setStatus(incoming ? 'Входящий звонок...' : 'Исходящий звонок');
+      tryInit();
+    };
+
+    // ================ Инициализация ================
+
+    async function tryInit() {
+      if (initialized) {
+        log('tryInit: уже инициализировано');
+        if (pendingOffer) {
+          log('tryInit: обнаружен pendingOffer, обрабатываю');
+          const offer = pendingOffer;
+          pendingOffer = null;
+          await processOffer(offer);
+        }
+        return;
+      }
+      if (initializing) {
+        log('tryInit: инициализация уже идёт, ждём');
+        return;
+      }
+
+      initializing = true;
+      log('tryInit START: isIncomingMode=' + isIncomingMode + ', iceMode=' + iceMode);
+
+      try {
+        setStatus('Запрос камеры и микрофона...');
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
+        localVideo.srcObject = localStream;
+        log('getUserMedia OK: video tracks=' + localStream.getVideoTracks().length
+            + ', audio tracks=' + localStream.getAudioTracks().length);
+
+        const vt = localStream.getVideoTracks()[0];
+        if (vt) {
+          const s = vt.getSettings();
+          log('local video settings: ' + JSON.stringify({
+            width: s.width, height: s.height, frameRate: s.frameRate,
+            facingMode: s.facingMode, deviceId: s.deviceId
+          }));
+          if (s.facingMode) {
+            currentFacingMode = s.facingMode;
+            log('currentFacingMode init: ' + currentFacingMode);
+          }
+        }
+
+        initCameraButton();
+
+        createPeerConnection();
+        log('peerConnection создан');
+
+        initialized = true;
+
+        if (!isIncomingMode) {
+          setStatus('Готов к звонку');
+          startAsCaller();
+        } else {
+          setStatus('Ожидание offer от вызывающего...');
+          if (pendingOffer) {
+            log('tryInit: обработка отложенного offer');
+            const offer = pendingOffer;
+            pendingOffer = null;
+            await processOffer(offer);
+          }
+        }
+      } catch (err) {
+        log('getUserMedia FAILED: ' + err.message);
+        setStatus('Ошибка камеры: ' + err.message);
+        window.android?.onCallError('Ошибка доступа к камере: ' + err.message);
+      } finally {
+        initializing = false;
+      }
+    }
+
+    // ================ Кнопка переключения камеры ================
+
+    function initCameraButton() {
+      const btn = document.getElementById('switchCameraBtn');
+      if (!btn) {
+        log('initCameraButton: switchCameraBtn не найден');
+        return;
+      }
+
+      btn.style.display = 'flex';
+
+      let lastTouchTime = 0;
+      const handle = function (e) {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        const now = Date.now();
+        if (now - lastTouchTime < 500) {
+          return;
+        }
+        lastTouchTime = now;
+        log('Клик: switchCameraBtn');
+        switchCamera();
+      };
+
+      btn.onclick = handle;
+      btn.ontouchstart = handle;
+
+      log('initCameraButton: обработчик навешен (click + touchstart)');
+    }
+
+    async function switchCamera() {
+      if (cameraSwitching) {
+        log('switchCamera: уже переключается — игнор');
+        return;
+      }
+      if (!localStream) {
+        log('switchCamera: localStream == null — игнор');
+        return;
+      }
+      if (!peerConnection) {
+        log('switchCamera: peerConnection == null — игнор');
+        return;
+      }
+
+      cameraSwitching = true;
+      const btn = document.getElementById('switchCameraBtn');
+      if (btn) btn.classList.add('switching');
+
+      const newFacing = (currentFacingMode === 'user') ? 'environment' : 'user';
+      log('switchCamera START: ' + currentFacingMode + ' → ' + newFacing);
+
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: newFacing } },
+          audio: false
+        });
+
+        const newVideoTrack = newStream.getVideoTracks()[0];
+        if (!newVideoTrack) {
+          throw new Error('newVideoTrack == null');
+        }
+
+        const s = newVideoTrack.getSettings();
+        log('switchCamera: новый трек получен, settings=' + JSON.stringify({
+          width: s.width, height: s.height, facingMode: s.facingMode,
+          deviceId: s.deviceId
+        }));
+
+        let videoSender = null;
+        const senders = peerConnection.getSenders();
+        for (const sr of senders) {
+          if (sr.track && sr.track.kind === 'video') {
+            videoSender = sr;
+            break;
+          }
+        }
+        if (!videoSender) {
+          log('switchCamera: videoSender не найден — новый трек закрываю');
+          newVideoTrack.stop();
+          throw new Error('videoSender == null');
+        }
+
+        await videoSender.replaceTrack(newVideoTrack);
+        log('switchCamera: sender.replaceTrack OK');
+
+        const oldVideoTrack = localStream.getVideoTracks()[0];
+        if (oldVideoTrack) {
+          oldVideoTrack.stop();
+          localStream.removeTrack(oldVideoTrack);
+          log('switchCamera: старый трек остановлен');
+        }
+
+        localStream.addTrack(newVideoTrack);
+
+        localVideo.srcObject = localStream;
+        if (newFacing === 'user') {
+          localVideo.style.transform = 'scaleX(-1)';
+        } else {
+          localVideo.style.transform = 'scaleX(1)';
+        }
+        const playPromise = localVideo.play();
+        if (playPromise && playPromise.catch) {
+          playPromise.catch(e => log('localVideo.play error: ' + e.message));
+        }
+
+        currentFacingMode = newFacing;
+        log('switchCamera OK: теперь ' + currentFacingMode);
+
+      } catch (e) {
+        log('switchCamera FAILED: ' + e.message);
+      } finally {
+        cameraSwitching = false;
+        if (btn) btn.classList.remove('switching');
+      }
+    }
+
+    // ================ PeerConnection ================
+
+    function createPeerConnection() {
+      const config = {
+        iceServers: iceServers,
+        iceTransportPolicy: 'all'
+      };
+      peerConnection = new RTCPeerConnection(config);
+      log('PC создан: ' + JSON.stringify(config) + ', iceMode=' + iceMode);
+
+      localStream.getTracks().forEach(track => {
+        log('Добавляю трек: ' + track.kind);
+        peerConnection.addTrack(track, localStream);
+      });
+
+      remoteVideo.onloadedmetadata = () => {
+        log('remoteVideo: loadedmetadata ' + remoteVideo.videoWidth
+            + 'x' + remoteVideo.videoHeight);
+      };
+      remoteVideo.onplaying = () => {
+        log('remoteVideo: playing');
+      };
+      remoteVideo.onstalled = () => {
+        log('remoteVideo: stalled');
+      };
+      remoteVideo.onsuspend = () => {
+        log('remoteVideo: suspend');
+      };
+      remoteVideo.onwaiting = () => {
+        log('remoteVideo: waiting');
+      };
+      remoteVideo.onerror = (e) => {
+        log('remoteVideo: error ' + (e && e.message ? e.message : 'unknown'));
+      };
+
+      peerConnection.ontrack = (event) => {
+        log('ontrack: kind=' + event.track.kind + ', streams=' + event.streams.length);
+        if (event.streams && event.streams[0]) {
+          if (remoteVideo.srcObject !== event.streams[0]) {
+            remoteVideo.srcObject = event.streams[0];
+            log('ontrack: привязал stream ' + event.streams[0].id
+                + ', tracks=' + event.streams[0].getTracks().length);
+          }
+        }
+        const playPromise = remoteVideo.play();
+        if (playPromise && playPromise.catch) {
+          playPromise.catch(e => log('remoteVideo.play error: ' + e.message));
+        }
+      };
+
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          const candStr = event.candidate.candidate;
+          const candType = getCandidateType(candStr);
+
+          if (iceMode === 'GATEWAY' && candType !== 'host') {
+            log('local candidate SKIP (GATEWAY, type=' + candType + '): ' + candStr);
+            return;
+          }
+
+          log('local candidate (type=' + candType + '): ' + candStr);
+          window.android?.sendSignal(
+            'candidate',
+            null,
+            JSON.stringify({
+              candidate: candStr,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            })
+          );
+        } else {
+          log('local candidate: null (end of candidates)');
+        }
+      };
+
+      peerConnection.onicecandidateerror = (e) => {
+        log('ICE candidate error: url=' + e.url
+            + ' code=' + e.errorCode + ' text=' + e.errorText);
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        const state = peerConnection.connectionState;
+        setStatus('Состояние: ' + state);
+        log('connectionState=' + state);
+
+        if (state === 'failed') {
+          attemptIceRestart();
+        } else if (state === 'connected' || state === 'completed') {
+          resetIceRestartState();
+          startStatsMonitor();
+        } else if (state === 'disconnected' || state === 'closed') {
+          log('connectionState=' + state + ': монитор продолжает работу');
+        }
+      };
+
+      peerConnection.oniceconnectionstatechange = () => {
+        const state = peerConnection.iceConnectionState;
+        log('iceConnectionState=' + state);
+
+        if (state === 'connected' || state === 'completed') {
+          resetIceRestartState();
+          setStatus('Соединение установлено');
+        }
+        if (state === 'disconnected') {
+          setStatus('Соединение нестабильно...');
+        }
+        if (state === 'failed') {
+          attemptIceRestart();
+        }
+      };
+
+      peerConnection.onicegatheringstatechange = () => {
+        log('iceGatheringState=' + peerConnection.iceGatheringState);
+      };
+
+      peerConnection.onsignalingstatechange = () => {
+        log('signalingState=' + peerConnection.signalingState);
+      };
+    }
+
+    // ================ Мониторинг getStats ================
+
+    function startStatsMonitor() {
+      if (statsInterval) {
+        log('statsMonitor уже запущен');
+        return;
+      }
+      statsSampleCount = 0;
+      lastStats = null;
+      log('════ statsMonitor START ════');
+      statsInterval = setInterval(pollStats, STATS_INTERVAL_MS);
+      pollStats();
+    }
+
+    function stopStatsMonitor() {
+      if (statsInterval) {
+        clearInterval(statsInterval);
+        statsInterval = null;
+        log('════ statsMonitor STOP ════');
+      }
+    }
+
+    async function pollStats() {
+      if (!peerConnection) return;
+      statsSampleCount++;
+      try {
+        const stats = await peerConnection.getStats();
+        const now = Date.now();
+
+        let rxAudioPkts = 0, rxVideoPkts = 0, txAudioPkts = 0, txVideoPkts = 0;
+        let rxAudioBytes = 0, rxVideoBytes = 0;
+        let txAudioBytes = 0, txVideoBytes = 0;
+        let rxFrames = 0, txFrames = 0;
+        let rxVideoW = 0, rxVideoH = 0;
+        let rxVideoFps = 0;
+        let jitterMs = null;
+        let packetsLost = 0;
+
+        let selectedPair = null;
+        const candidates = {};
+        const allSucceededPairs = [];
+        let transportReport = null;
+
+        stats.forEach(r => {
+          if (r.type === 'local-candidate' || r.type === 'remote-candidate') {
+            candidates[r.id] = r;
+          }
+          if (r.type === 'candidate-pair' && r.state === 'succeeded') {
+            allSucceededPairs.push(r);
+            if (r.nominated) {
+              selectedPair = r;
+            }
+          }
+          if (r.type === 'transport') {
+            transportReport = r;
+          }
+        });
+
+        stats.forEach(r => {
+          if (r.type === 'inbound-rtp') {
+            if (r.kind === 'audio') {
+              rxAudioPkts = r.packetsReceived || 0;
+              rxAudioBytes = r.bytesReceived || 0;
+            } else if (r.kind === 'video') {
+              rxVideoPkts = r.packetsReceived || 0;
+              rxVideoBytes = r.bytesReceived || 0;
+              rxFrames = r.framesDecoded || 0;
+              if (r.frameWidth) rxVideoW = r.frameWidth;
+              if (r.frameHeight) rxVideoH = r.frameHeight;
+              if (r.framesPerSecond) rxVideoFps = r.framesPerSecond;
+            }
+            if (r.jitter != null) jitterMs = (r.jitter * 1000).toFixed(1);
+            if (r.packetsLost != null) packetsLost = r.packetsLost;
+          } else if (r.type === 'outbound-rtp') {
+            if (r.kind === 'audio') {
+              txAudioPkts = r.packetsSent || 0;
+              txAudioBytes = r.bytesSent || 0;
+            } else if (r.kind === 'video') {
+              txVideoPkts = r.packetsSent || 0;
+              txVideoBytes = r.bytesSent || 0;
+              txFrames = r.framesEncoded || 0;
+            }
+          }
+        });
+
+        let rxAudioKbps = 0, rxVideoKbps = 0, txAudioKbps = 0, txVideoKbps = 0;
+        if (lastStats) {
+          const dt = (now - lastStats.t) / 1000;
+          if (dt > 0) {
+            rxAudioKbps = ((rxAudioBytes - lastStats.rxAudioBytes) * 8 / 1000 / dt).toFixed(1);
+            rxVideoKbps = ((rxVideoBytes - lastStats.rxVideoBytes) * 8 / 1000 / dt).toFixed(1);
+            txAudioKbps = ((txAudioBytes - lastStats.txAudioBytes) * 8 / 1000 / dt).toFixed(1);
+            txVideoKbps = ((txVideoBytes - lastStats.txVideoBytes) * 8 / 1000 / dt).toFixed(1);
+          }
+        }
+        lastStats = { t: now, rxAudioBytes, rxVideoBytes, txAudioBytes, txVideoBytes };
+
+        let pairInfo = '?';
+        if (selectedPair) {
+          const lc = candidates[selectedPair.localCandidateId];
+          const rc = candidates[selectedPair.remoteCandidateId];
+          if (lc && rc) {
+            pairInfo = (lc.candidateType || '?') + ' ' + (lc.address || '?') + ':' + (lc.port || '?')
+                     + ' ↔ ' + (rc.candidateType || '?') + ' ' + (rc.address || '?') + ':' + (rc.port || '?');
+          }
+        }
+
+        const summary = 'STATS[' + statsSampleCount + ']: '
+          + 'rxV=' + rxVideoPkts + ' pkt/' + rxVideoBytes + ' B/' + rxFrames + ' f/' + rxVideoKbps + ' kbps'
+          + ' | txV=' + txVideoPkts + ' pkt/' + txVideoBytes + ' B/' + txFrames + ' f/' + txVideoKbps + ' kbps'
+          + ' | rxA=' + rxAudioPkts + ' pkt/' + rxAudioKbps + ' kbps'
+          + ' | txA=' + txAudioPkts + ' pkt/' + txAudioKbps + ' kbps'
+          + ' | vSize=' + rxVideoW + 'x' + rxVideoH + '@' + rxVideoFps + 'fps'
+          + ' | jitter=' + (jitterMs || '?') + 'ms lost=' + packetsLost
+          + ' | pair=' + pairInfo;
+
+        log(summary);
+
+        allSucceededPairs.forEach((p, idx) => {
+          const lc = candidates[p.localCandidateId];
+          const rc = candidates[p.remoteCandidateId];
+          log('PAIR[' + idx + ']: nominated=' + p.nominated
+              + ' state=' + p.state
+              + ' | local=' + (lc ? (lc.candidateType + ' ' + lc.address + ':' + lc.port) : '?')
+              + ' | remote=' + (rc ? (rc.candidateType + ' ' + rc.address + ':' + rc.port) : '?')
+              + ' | bytesSent=' + (p.bytesSent || 0)
+              + ' bytesRecv=' + (p.bytesReceived || 0)
+              + ' currentRtt=' + (p.currentRoundTripTime != null
+                  ? (p.currentRoundTripTime * 1000).toFixed(0) + 'ms' : '?'));
+        });
+
+        if (transportReport) {
+          log('TRANSPORT: dtlsState=' + transportReport.dtlsState
+              + ' iceState=' + transportReport.iceState
+              + ' selectedPairId=' + (transportReport.selectedCandidatePairId || 'null'));
+        }
+
+      } catch (e) {
+        log('getStats error: ' + e.message);
+      }
+    }
+
+    // ================ ICE Restart ================
+
+    function resetIceRestartState() {
+      iceRestartAttempts = 0;
+      iceRestartInProgress = false;
+      if (iceRestartLockoutTimer) {
+        clearTimeout(iceRestartLockoutTimer);
+        iceRestartLockoutTimer = null;
+      }
+    }
+
+    function attemptIceRestart() {
+      if (iceRestartInProgress) {
+        log('ICE-RESTART: уже в процессе — игнорируем');
+        return;
+      }
+      if (iceRestartAttempts >= maxIceRestartAttempts) {
+        log('ICE-RESTART: исчерпаны попытки');
+        setStatus('Не удалось восстановить соединение');
+        window.android?.onCallError('ICE restart: исчерпаны попытки');
+        return;
+      }
+
+      iceRestartInProgress = true;
+      if (iceRestartLockoutTimer) clearTimeout(iceRestartLockoutTimer);
+      iceRestartLockoutTimer = setTimeout(() => {
+        iceRestartInProgress = false;
+        iceRestartLockoutTimer = null;
+        log('ICE-RESTART: lockout снят');
+      }, ICE_RESTART_LOCKOUT_MS);
+
+      iceRestartAttempts++;
+      const delayMs = Math.pow(2, iceRestartAttempts) * 1000;
+      setStatus('Восстановление связи (' + iceRestartAttempts + '/'
+          + maxIceRestartAttempts + ')...');
+      log('ICE-RESTART: попытка ' + iceRestartAttempts + ', через ' + delayMs + ' мс');
+
+      setTimeout(async () => {
+        try {
+          if (typeof peerConnection.restartIce === 'function') {
+            peerConnection.restartIce();
+          }
+          if (!isIncomingMode) {
+            const offer = await peerConnection.createOffer({ iceRestart: true });
+            await peerConnection.setLocalDescription(offer);
+            window.android?.sendSignal(
+              'offer',
+              JSON.stringify(peerConnection.localDescription),
+              null
+            );
+            log('ICE-RESTART: offer отправлен');
+          }
+        } catch (e) {
+          log('ICE-RESTART ошибка: ' + e.message);
+          iceRestartInProgress = false;
+          if (iceRestartLockoutTimer) {
+            clearTimeout(iceRestartLockoutTimer);
+            iceRestartLockoutTimer = null;
+          }
+        }
+      }, delayMs);
+    }
+
+    // ================ Caller ================
+
+    async function startAsCaller() {
+      try {
+        setStatus('Создание offer...');
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        window.android?.sendSignal(
+          'offer',
+          JSON.stringify(peerConnection.localDescription),
+          null
+        );
+        setStatus('Ожидание ответа...');
+        log('offer отправлен');
+      } catch (e) {
+        log('Ошибка создания offer: ' + e.message);
+        setStatus('Ошибка создания offer: ' + e.message);
+        window.android?.onCallError(e.message);
+      }
+    }
+
+    // ================ Входящие сигналы ================
+
+    window.onRemoteOffer = async function(jsonStr) {
+      try {
+        log('onRemoteOffer: получен');
+        setStatus('Получен offer');
+
+        if (!initialized || !peerConnection) {
+          log('onRemoteOffer: PC не готов, сохраняю offer');
+          pendingOffer = jsonStr;
+          tryInit();
+          return;
+        }
+
+        await processOffer(jsonStr);
+      } catch (e) {
+        log('onRemoteOffer error: ' + e.message);
+        window.android?.onCallError('Ошибка обработки offer: ' + e.message);
+      }
+    };
+
+    async function processOffer(jsonStr) {
+      if (!peerConnection) {
+        log('processOffer: PC всё ещё null — некорректный вызов');
+        return;
+      }
+      try {
+        log('processOffer START');
+        const msg = JSON.parse(jsonStr);
+        const sdp = JSON.parse(msg.payload.sdp);
+
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+        remoteDescriptionSet = true;
+        log('setRemoteDescription(offer) OK');
+        flushPendingCandidates();
+
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        log('createAnswer + setLocalDescription OK');
+
+        window.android?.sendSignal(
+          'answer',
+          JSON.stringify(peerConnection.localDescription),
+          null
+        );
+        log('answer отправлен');
+        setStatus('Соединение...');
+      } catch (e) {
+        log('processOffer error: ' + e.message);
+        window.android?.onCallError('Ошибка обработки offer: ' + e.message);
+      }
+    }
+
+    window.onRemoteAnswer = async function(jsonStr) {
+      try {
+        log('onRemoteAnswer: получен');
+        if (!peerConnection) {
+          log('onRemoteAnswer: PC null');
+          return;
+        }
+        const msg = JSON.parse(jsonStr);
+        const sdp = JSON.parse(msg.payload.sdp);
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+        remoteDescriptionSet = true;
+        log('setRemoteDescription(answer) OK');
+        flushPendingCandidates();
+        setStatus('Соединение установлено');
+        resetIceRestartState();
+      } catch (e) {
+        log('onRemoteAnswer error: ' + e.message);
+        window.android?.onCallError('Ошибка обработки answer: ' + e.message);
+      }
+    };
+
+    window.onRemoteCandidate = async function(jsonStr) {
+      try {
+        const msg = JSON.parse(jsonStr);
+        const p = msg.payload;
+        if (!p || !p.candidate) {
+          log('onRemoteCandidate: пустой candidate');
+          return;
+        }
+        log('onRemoteCandidate: ' + p.candidate);
+
+        if (!peerConnection || !remoteDescriptionSet) {
+          log('candidate отложен (PC=' + !!peerConnection
+              + ', remoteDescSet=' + remoteDescriptionSet + ')');
+          pendingCandidates.push(p);
+          return;
+        }
+
+        await peerConnection.addIceCandidate(new RTCIceCandidate({
+          candidate: p.candidate,
+          sdpMid: p.sdpMid,
+          sdpMLineIndex: p.sdpMLineIndex
+        }));
+        log('addIceCandidate OK');
+      } catch (e) {
+        log('onRemoteCandidate error: ' + e.message);
+      }
+    };
+
+    async function flushPendingCandidates() {
+      if (pendingCandidates.length === 0) return;
+      log('flushPendingCandidates: ' + pendingCandidates.length);
+      const list = pendingCandidates;
+      pendingCandidates = [];
+      for (const p of list) {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate({
+            candidate: p.candidate,
+            sdpMid: p.sdpMid,
+            sdpMLineIndex: p.sdpMLineIndex
+          }));
+          log('addIceCandidate (flush) OK');
+        } catch (e) {
+          log('addIceCandidate (flush) error: ' + e.message);
+        }
+      }
+    }
+
+    // ================ Управление ================
+
+    document.getElementById('toggleAudio').onclick = () => {
+      const track = localStream?.getAudioTracks()[0];
+      if (track) {
+        track.enabled = !track.enabled;
+        document.getElementById('toggleAudio').innerText =
+            track.enabled ? 'Микрофон' : '🔇';
+      }
+    };
+
+    document.getElementById('toggleVideo').onclick = () => {
+      const track = localStream?.getVideoTracks()[0];
+      if (track) {
+        track.enabled = !track.enabled;
+        document.getElementById('toggleVideo').innerText =
+            track.enabled ? 'Камера' : '🎥';
+      }
+    };
+
+    document.getElementById('endCall').onclick = () => {
+      stopStatsMonitor();
+      try { peerConnection?.close(); } catch (e) {}
+      window.android?.onCallEnded();
+    };
+
+    // ================ Fallback ================
+
+    log('call.html загружен (build with stats v2, iceMode support, camera switch v3)');
+  </script>
+</body>
+</html>

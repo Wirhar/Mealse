@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="10dp"
+    android:background="#FFFFFF">
+
+    <TextView
+        android:id="@+id/tv_peer_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Устройство"
+        android:textSize="14sp"
+        android:textColor="#2D3748"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tv_peer_address"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="aa:bb:cc:dd:ee:ff"
+        android:textSize="12sp"
+        android:textColor="#718096"
+        android:layout_marginTop="2dp" />
+
+    <TextView
+        android:id="@+id/tv_peer_status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="available"
+        android:textSize="11sp"
+        android:textColor="#A0AEC0"
+        android:layout_marginTop="2dp" />
+
+</LinearLayout>

@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="start"
+    android:paddingStart="12dp"
+    android:paddingEnd="48dp"
+    android:paddingTop="4dp"
+    android:paddingBottom="4dp">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#FFFFFF"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/mr_sender"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:textColor="#6B46C1"
+            android:visibility="gone" />
+
+        <!-- Текст -->
+        <TextView
+            android:id="@+id/mr_body"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxWidth="280dp"
+            android:text=""
+            android:textSize="15sp"
+            android:textColor="#2D3748"
+            android:textIsSelectable="true" />
+
+        <!-- Контейнер вложения (FILE) — по умолчанию GONE -->
+        <LinearLayout
+            android:id="@+id/mr_attachment"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#00000011"
+            android:paddingStart="8dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:visibility="gone">
+
+            <!-- Иконка-эмодзи (для не-image) -->
+            <TextView
+                android:id="@+id/mr_attach_icon"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:gravity="center"
+                android:text="📎"
+                android:textSize="22sp" />
+
+            <!-- ★ Улучшение №2: превью картинки (60x60, Glide) -->
+            <ImageView
+                android:id="@+id/mr_attach_thumb"
+                android:layout_width="60dp"
+                android:layout_height="60dp"
+                android:scaleType="centerCrop"
+                android:visibility="gone"
+                android:contentDescription="Превью" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginStart="8dp">
+
+                <TextView
+                    android:id="@+id/mr_attach_name"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:maxWidth="200dp"
+                    android:text=""
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:textColor="#2D3748"
+                    android:maxLines="1"
+                    android:ellipsize="middle" />
+
+                <TextView
+                    android:id="@+id/mr_attach_size"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textSize="11sp"
+                    android:textColor="#718096" />
+
+                <!-- ★ Улучшение №3: прогресс (для входящих почти не нужен, но для единообразия) -->
+                <ProgressBar
+                    android:id="@+id/mr_attach_progress"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="4dp"
+                    android:layout_marginTop="4dp"
+                    android:max="100"
+                    android:progress="0"
+                    android:visibility="gone" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/mr_time"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end"
+            android:layout_marginTop="2dp"
+            android:text=""
+            android:textSize="10sp"
+            android:textColor="#718096" />
+    </LinearLayout>
+
+</LinearLayout>

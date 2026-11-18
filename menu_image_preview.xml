@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/ip_action_delete"
+        android:title="🗑 Удалить"
+        android:icon="@drawable/ic_delete"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/ip_action_share"
+        android:title="📤 Поделиться"
+        android:icon="@drawable/ic_share"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/ip_action_info"
+        android:title="ℹ Информация"
+        android:icon="@drawable/ic_info"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/ip_action_copy_path"
+        android:title="📋 Копировать путь"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/ip_action_open_with"
+        android:title="🌐 Открыть в другом приложении"
+        app:showAsAction="never" />
+
+</menu>

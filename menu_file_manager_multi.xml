@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/fm_multi_select_all"
+        android:title="Выбрать всё"
+        android:icon="@drawable/ic_check"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_multi_download"
+        android:title="Скачать"
+        android:icon="@drawable/ic_download"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_multi_copy"
+        android:title="Копировать"
+        android:icon="@drawable/ic_file_generic"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_multi_move"
+        android:title="Переместить"
+        android:icon="@drawable/ic_folder"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_multi_paste"
+        android:title="Вставить"
+        android:icon="@drawable/ic_paste"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_multi_delete"
+        android:title="Удалить"
+        android:icon="@drawable/ic_delete"
+        app:showAsAction="ifRoom" />
+
+</menu>

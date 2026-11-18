@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    
+    <item
+        android:id="@+id/fm_menu_pick_this_folder"
+        android:title="✓ Выбрать папку"
+        android:icon="@drawable/ic_check_circle"
+        android:visible="false"
+        app:showAsAction="always" />
+    
+    <item
+        android:id="@+id/fm_menu_refresh"
+        android:title="🔄 Обновить"
+        android:icon="@drawable/ic_refresh"
+        app:showAsAction="always" />
+
+    <item
+        android:id="@+id/fm_menu_new_folder"
+        android:title="➕ Создать папку"
+        android:icon="@drawable/ic_add"
+        app:showAsAction="ifRoom" />
+
+    <!-- ★ НОВОЕ: создать текстовый документ -->
+    <item
+        android:id="@+id/fm_menu_new_text"
+        android:title="📝 Новый документ"
+        android:icon="@drawable/ic_file_document"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_menu_search"
+        android:title="🔍 Поиск"
+        android:icon="@drawable/ic_search"
+        app:showAsAction="ifRoom" />
+
+    <!-- ★ НОВОЕ: вставить -->
+    <item
+        android:id="@+id/fm_menu_paste"
+        android:title="📥 Вставить"
+        android:icon="@drawable/ic_paste"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/fm_menu_trash"
+        android:title="🗑 Корзина"
+        android:icon="@drawable/ic_delete"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/fm_menu_sort"
+        android:title="📊 Сортировка">
+        <menu>
+            <item android:id="@+id/fm_sort_name_asc"   android:title="По имени (А-Я)" />
+            <item android:id="@+id/fm_sort_name_desc"  android:title="По имени (Я-А)" />
+            <item android:id="@+id/fm_sort_date_desc"  android:title="По дате (новые)" />
+            <item android:id="@+id/fm_sort_date_asc"   android:title="По дате (старые)" />
+            <item android:id="@+id/fm_sort_size_desc"  android:title="По размеру (крупные)" />
+            <item android:id="@+id/fm_sort_size_asc"   android:title="По размеру (мелкие)" />
+        </menu>
+    </item>
+
+    <item
+        android:id="@+id/fm_menu_show_hidden"
+        android:title="👁 Скрытые"
+        android:checkable="true" />
+
+</menu>

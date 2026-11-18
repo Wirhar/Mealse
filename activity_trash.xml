@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#1E1E1E">
+
+    <android.widget.Toolbar
+        android:id="@+id/trash_toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="?attr/actionBarSize"
+        android:background="#16213E"
+        android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar"
+        app:popupTheme="@style/ThemeOverlay.AppCompat.Dark"
+        app:title="Корзина"
+        app:titleTextColor="#FFFFFF" />
+
+    <TextView
+        android:id="@+id/trash_info"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#232946"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:text="Файлы хранятся 10 дней"
+        android:textColor="#A0AEC0"
+        android:textSize="12sp" />
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="#444444" />
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <ListView
+            android:id="@+id/trash_list"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:divider="#333333"
+            android:dividerHeight="1dp"
+            android:background="#1E1E1E" />
+
+        <TextView
+            android:id="@+id/trash_empty"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:textSize="16sp"
+            android:textColor="#888"
+            android:text="🗑 Корзина пуста"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+</LinearLayout>nearLayout>

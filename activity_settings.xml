@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F0F4F8"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Настройки Mealse"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#2D3748"
+            android:layout_marginBottom="24dp" />
+
+        <Button
+            android:id="@+id/btn_show_my_device"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Показать данные этого устройства"
+            android:backgroundTint="#4C51BF"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="16dp" />
+
+        <Button
+            android:id="@+id/btn_add_node"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Добавить устройство вручную"
+            android:backgroundTint="#2B6CB0"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="24dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Управление узлами"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="12dp" />
+
+        <ListView
+            android:id="@+id/list_saved_nodes"
+            android:layout_width="match_parent"
+            android:layout_height="200dp"
+            android:background="#FFFFFF"
+            android:divider="#E2E8F0"
+            android:dividerHeight="1dp"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Поведение"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="12dp" />
+
+        <CheckBox
+            android:id="@+id/cb_auto_start"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Автозапуск при загрузке"
+            android:textSize="15sp"
+            android:layout_marginBottom="12dp"
+            android:checked="true" />
+
+        <CheckBox
+            android:id="@+id/cb_run_background"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Работа в фоне (foreground service)"
+            android:textSize="15sp"
+            android:layout_marginBottom="12dp"
+            android:checked="true" />
+
+        <!-- ============ TURN ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="TURN-сервер (для NAT)"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#4A5568"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="12dp" />
+
+        <CheckBox
+            android:id="@+id/cb_use_turn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Использовать TURN-сервер"
+            android:textSize="15sp"
+            android:layout_marginBottom="8dp"
+            android:checked="true" />
+
+        <EditText
+            android:id="@+id/edit_turn_url"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:hint="turn:host:port"
+            android:inputType="textUri"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/edit_turn_username"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:hint="Username"
+            android:inputType="text"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/edit_turn_credential"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:hint="Credential"
+            android:inputType="textPassword"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btn_reset_turn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Сбросить на публичный TURN"
+            android:backgroundTint="#A0AEC0"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ============ Центральный сервер ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Центральный сервер (TURN на VPS)"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#4A5568"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Опционально. Если у вас есть свой TURN-сервер (например, coturn на VPS), укажите его здесь. Он будет использоваться в дополнение к публичному openrelay."
+            android:textSize="12sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="12dp" />
+
+        <EditText
+            android:id="@+id/edit_central_url"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:hint="turn:your-vps.example.com:3478"
+            android:inputType="textUri"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/edit_central_username"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:hint="Username"
+            android:inputType="text"
+            android:layout_marginBottom="8dp" />
+
+        <EditText
+            android:id="@+id/edit_central_credential"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:hint="Credential"
+            android:inputType="textPassword"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btn_central_clear"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Очистить центральный сервер"
+            android:backgroundTint="#A0AEC0"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ============ Сохранить ============ -->
+        <Button
+            android:id="@+id/btn_save_settings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Сохранить настройки"
+            android:backgroundTint="#4C51BF"
+            android:textColor="#FFFFFF"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Версия: 1.0"
+            android:textSize="13sp"
+            android:textColor="#A0AEC0"
+            android:layout_gravity="center_horizontal" />
+
+    </LinearLayout>
+</ScrollView>

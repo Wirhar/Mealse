@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F0F4F8"
+    android:padding="16dp"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Заголовок -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Wi-Fi Direct"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#2D3748"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Статус -->
+        <TextView
+            android:id="@+id/tv_wifi_direct_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Не подключено"
+            android:textSize="15sp"
+            android:textColor="#4A5568"
+            android:background="#FFFFFF"
+            android:padding="12dp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Кнопки управления -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/btn_wifi_direct_discover"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Найти"
+                android:textSize="14sp"
+                android:backgroundTint="#4C51BF"
+                android:textColor="#FFFFFF"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/btn_wifi_direct_disconnect"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Отключиться"
+                android:textSize="14sp"
+                android:backgroundTint="#E53E3E"
+                android:textColor="#FFFFFF"
+                android:layout_marginStart="4dp"
+                android:enabled="false" />
+        </LinearLayout>
+
+        <!-- Список пиров -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Найденные устройства:"
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="4dp" />
+
+        <!--
+            ★ ListView в FrameLayout с фиксированной высотой.
+            Прямо внутри ScrollView ListView растянулся бы на все элементы,
+            поэтому оборачиваем в FrameLayout с фиксированной высотой 180dp.
+            Скроллбар 12dp, яркий #4C51BF, не исчезает.
+        -->
+        <FrameLayout
+            android:id="@+id/wifi_peers_list_wrapper"
+            android:layout_width="match_parent"
+            android:layout_height="180dp"
+            android:background="#FFFFFF">
+
+            <ListView
+                android:id="@+id/list_wifi_peers"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:divider="#E2E8F0"
+                android:dividerHeight="1dp"
+                android:scrollbars="vertical"
+                android:fadeScrollbars="false"
+                android:scrollbarStyle="outsideOverlay"
+                android:scrollbarSize="12dp"
+                android:scrollbarThumbVertical="@drawable/scrollbar_thumb"
+                android:scrollbarTrackVertical="@android:color/transparent"
+                android:overScrollMode="ifContentScrolls"
+                android:listSelector="@android:color/transparent" />
+        </FrameLayout>
+
+        <!-- Подсказка -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Wi-Fi Direct позволяет соединиться напрямую без роутера. Устройства должны быть рядом (до ~100 м).\n\nНажмите «Найти», чтобы обнаружить устройства. При выборе пира нужно указать роль: Group Owner (создаёт группу) или клиент (подключается к группе)."
+            android:textSize="12sp"
+            android:textColor="#A0AEC0"
+            android:layout_marginTop="12dp" />
+
+    </LinearLayout>
+</ScrollView>

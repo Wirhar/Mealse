@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/vp_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Surface для видео -->
+    <com.my.mealse.filemanager.view.AspectRatioSurfaceView
+        android:id="@+id/vp_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center" />
+
+    <!-- Индикатор загрузки -->
+    <ProgressBar
+        android:id="@+id/vp_loading"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:visibility="gone" />
+
+    <!-- Мини-превью при перемотке -->
+    <FrameLayout
+        android:id="@+id/vp_seek_preview_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="96dp"
+        android:background="#CC000000"
+        android:padding="2dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/vp_seek_preview"
+            android:layout_width="160dp"
+            android:layout_height="90dp"
+            android:scaleType="fitCenter"
+            android:adjustViewBounds="true"
+            android:contentDescription="Превью кадра" />
+
+    </FrameLayout>
+
+    <!-- Панель управления -->
+    <FrameLayout
+        android:id="@+id/vp_controls"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="false"
+        android:focusable="false"
+        android:visibility="visible">
+
+        <!-- Верхняя панель -->
+        <LinearLayout
+            android:id="@+id/vp_top"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:background="#88000000"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp">
+
+            <ImageButton
+                android:id="@+id/vp_btn_back"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_close"
+                android:scaleType="centerInside"
+                android:contentDescription="Назад" />
+
+            <TextView
+                android:id="@+id/vp_title"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:ellipsize="middle"
+                android:maxLines="1"
+                android:text="Видео"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+        </LinearLayout>
+
+        <!-- Центральная кнопка Play/Pause -->
+        <ImageButton
+            android:id="@+id/vp_center_play"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:layout_gravity="center"
+            android:background="@android:color/transparent"
+            android:src="@drawable/ic_play"
+            android:scaleType="centerInside"
+            android:contentDescription="Воспроизвести" />
+
+        <!-- Нижняя панель -->
+        <LinearLayout
+            android:id="@+id/vp_bottom"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:background="#88000000"
+            android:orientation="vertical"
+            android:padding="8dp">
+
+            <!-- Строка с временем и SeekBar -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/vp_time_current"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:minWidth="44dp" />
+
+                <SeekBar
+                    android:id="@+id/vp_seekbar"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:id="@+id/vp_time_total"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:minWidth="44dp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Строка с кнопками управления -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:orientation="horizontal">
+
+                <ImageButton
+                    android:id="@+id/vp_btn_prev"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@android:drawable/ic_media_previous"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Предыдущее видео" />
+
+                <ImageButton
+                    android:id="@+id/vp_btn_play_pause"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@android:drawable/ic_media_play"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Пуск/пауза" />
+
+                <ImageButton
+                    android:id="@+id/vp_btn_next"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@android:drawable/ic_media_next"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Следующее видео" />
+
+                <ImageButton
+                    android:id="@+id/vp_btn_fullscreen"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:layout_marginStart="8dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_fullscreen"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Полный экран" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+</FrameLayout>

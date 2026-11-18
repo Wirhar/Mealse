@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Mealse</string>
+    <string name="file_manager_title">Файлы</string>
+<string name="file_manager_trash">Корзина</string>
+<string name="file_manager_source_device">📱 Это устройство</string>
+<string name="file_manager_source_app">📦 Приложение</string>
+<string name="file_manager_connecting">Подключение…</string>
+<string name="file_manager_error_denied">Узел не дал доступ к файлам</string>
+<string name="file_manager_error_network">Нет связи с узлом</string>
+</resources>

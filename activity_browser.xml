@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#1E1E1E">
+
+    <!-- ============ Адресная строка + кнопки ============ -->
+    <LinearLayout
+        android:id="@+id/br_addr_bar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#16213E"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp">
+
+        <ImageButton
+            android:id="@+id/br_btn_back_page"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_arrow_up"
+            android:scaleX="-1"
+            android:contentDescription="Назад"
+            android:scaleType="centerInside" />
+
+        <ImageButton
+            android:id="@+id/br_btn_forward_page"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_arrow_up"
+            android:rotation="90"
+            android:contentDescription="Вперёд"
+            android:scaleType="centerInside"
+            android:enabled="false" />
+
+        <EditText
+            android:id="@+id/br_address_input"
+            android:layout_width="0dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="#0F3460"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:hint="Введите адрес или поиск…"
+            android:textColorHint="#718096"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:fontFamily="monospace"
+            android:inputType="textUri"
+            android:imeOptions="actionGo"
+            android:maxLines="1"
+            android:singleLine="true" />
+
+        <ImageButton
+            android:id="@+id/br_btn_refresh"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_play"
+            android:contentDescription="Обновить"
+            android:scaleType="centerInside" />
+
+        <ImageButton
+            android:id="@+id/br_btn_stop"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_stop"
+            android:contentDescription="Стоп"
+            android:scaleType="centerInside"
+            android:visibility="gone" />
+
+        <ImageButton
+            android:id="@+id/br_btn_home"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_browser"
+            android:contentDescription="Домой"
+            android:scaleType="centerInside" />
+
+        <ImageButton
+            android:id="@+id/br_btn_menu"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="?android:attr/selectableItemBackgroundBorderless"
+            android:src="@android:drawable/ic_menu_more"
+            android:contentDescription="Меню"
+            android:scaleType="centerInside" />
+    </LinearLayout>
+
+    <!-- ============ Прогресс ============ -->
+    <ProgressBar
+        android:id="@+id/br_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="3dp"
+        android:max="100"
+        android:progress="0"
+        android:progressTint="#4C51BF"
+        android:visibility="gone" />
+
+    <!-- ============ WebView ============ -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <WebView
+            android:id="@+id/br_webview"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#FFFFFF" />
+
+        <!-- Пустое состояние: показывается, когда WebView пуст (стартовый экран) -->
+        <LinearLayout
+            android:id="@+id/br_empty"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="#1E1E1E"
+            android:padding="24dp"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:src="@drawable/ic_browser"
+                android:contentDescription="@null"
+                android:layout_marginBottom="16dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="🌐 Браузер Mealse"
+                android:textColor="#FFFFFF"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/br_empty_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Введите адрес в строке сверху"
+                android:textColor="#A0AEC0"
+                android:textSize="13sp"
+                android:gravity="center" />
+        </LinearLayout>
+    </FrameLayout>
+
+</LinearLayout>

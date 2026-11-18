@@ -1,0 +1,496 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#F0F4F8"
+    android:padding="16dp"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Режим шлюза (VPN)"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#2D3748"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/tv_current_mode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Режим: —"
+            android:textSize="14sp"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ============ Режим: Клиент / Сервер ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Выберите режим"
+            android:textSize="16sp"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:id="@+id/rg_mode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+
+            <RadioButton
+                android:id="@+id/rb_mode_client"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Клиент"
+                android:checked="true" />
+
+            <RadioButton
+                android:id="@+id/rb_mode_server"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Сервер (шлюз)" />
+        </LinearLayout>
+
+        <!-- ============ Статус VPN ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Статус VPN"
+            android:textSize="16sp"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/tv_tunnel_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="VPN выключен"
+            android:textSize="15sp"
+            android:textColor="#E53E3E"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:id="@+id/tv_clients_count"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="14sp"
+            android:textColor="#2B6CB0"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone" />
+
+        <!-- ============ Транспорт (dual-stack) ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Транспорт (IPv4 / IPv6)"
+            android:textSize="16sp"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="4dp">
+
+            <CheckBox
+                android:id="@+id/cb_transport_ipv4"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="IPv4"
+                android:checked="true" />
+
+            <CheckBox
+                android:id="@+id/cb_transport_ipv6"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="IPv6"
+                android:checked="true" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Оба включены — dual-stack: туннель переносит и IPv4, и IPv6-пакеты. Для «внешнего выхода» через шлюз рекомендуется включить IPv6 (симки одного оператора обычно дают публичный IPv6)."
+            android:textSize="11sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="16dp" />
+
+        <!-- ============ ПОЛЯ КЛИЕНТА ============ -->
+        <LinearLayout
+            android:id="@+id/client_fields"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp"
+            android:visibility="visible">
+
+            <!-- IPv4-адрес шлюза -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="IPv4-адрес шлюза"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <EditText
+                    android:id="@+id/edit_gateway_ip"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:background="#FFFFFF"
+                    android:padding="12dp"
+                    android:hint="Например, 111.111.1.111"
+                    android:inputType="textUri"
+                    android:layout_marginEnd="8dp" />
+
+                <ImageButton
+                    android:id="@+id/btn_pick_ipv4"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_node"
+                    android:contentDescription="Выбрать из узлов"
+                    android:scaleType="centerInside"
+                    android:padding="8dp" />
+            </LinearLayout>
+
+            <!-- IPv6-адрес шлюза -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="IPv6-адрес шлюза (2a00:...)"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <EditText
+                    android:id="@+id/edit_gateway_ip_v6"
+                    android:layout_width="0dp"
+                    android:layout_height="48dp"
+                    android:layout_weight="1"
+                    android:background="#FFFFFF"
+                    android:padding="12dp"
+                    android:hint="Например, 2a00:1234:5678::1"
+                    android:inputType="textUri"
+                    android:fontFamily="monospace"
+                    android:layout_marginEnd="8dp" />
+
+                <ImageButton
+                    android:id="@+id/btn_pick_ipv6"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_node"
+                    android:contentDescription="Выбрать из узлов"
+                    android:scaleType="centerInside"
+                    android:padding="8dp" />
+            </LinearLayout>
+
+            <!-- Порт (общий) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Порт шлюза (общий для v4/v6)"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <EditText
+                android:id="@+id/edit_gateway_port"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="#FFFFFF"
+                android:padding="12dp"
+                android:hint="8083"
+                android:inputType="number"
+                android:text="8083"
+                android:layout_marginBottom="12dp" />
+
+            <!-- Приоритет транспорта -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Приоритет подключения"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <RadioGroup
+                android:id="@+id/rg_gateway_priority"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <RadioButton
+                    android:id="@+id/rb_priority_ipv6"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="IPv6"
+                    android:checked="true" />
+
+                <RadioButton
+                    android:id="@+id/rb_priority_ipv4"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="IPv4" />
+
+                <RadioButton
+                    android:id="@+id/rb_priority_auto"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Авто" />
+            </RadioGroup>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="IPv6 → клиент сначала пытается подключиться по IPv6, при неудаче — по IPv4. Авто — пробует оба параллельно, берёт первый успешный."
+                android:textSize="11sp"
+                android:textColor="#718096"
+                android:layout_marginBottom="12dp" />
+
+            <!-- Кнопка проверки доступности шлюза -->
+            <Button
+                android:id="@+id/btn_check_gateway"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Проверить доступность шлюза"
+                android:backgroundTint="#2B6CB0"
+                android:textColor="#FFFFFF"
+                android:layout_marginBottom="12dp" />
+
+            <TextView
+                android:id="@+id/tv_gateway_check_result"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textSize="12sp"
+                android:textColor="#4A5568"
+                android:padding="8dp"
+                android:background="#EDF2F7"
+                android:visibility="gone"
+                android:layout_marginBottom="8dp" />
+
+        </LinearLayout>
+
+        <!-- ============ ПОЛЯ СЕРВЕРА ============ -->
+        <LinearLayout
+            android:id="@+id/server_fields"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone">
+
+            <!-- Порт (общий) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Порт для приёма клиентов (v4 + v6)"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <EditText
+                android:id="@+id/edit_listen_port"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="#FFFFFF"
+                android:padding="12dp"
+                android:hint="8083"
+                android:inputType="number"
+                android:text="8083"
+                android:layout_marginBottom="8dp" />
+
+            <!-- Слушать IPv6 -->
+            <CheckBox
+                android:id="@+id/cb_listen_ipv6"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Слушать IPv6 (рекомендуется)"
+                android:checked="true"
+                android:layout_marginBottom="8dp" />
+
+            <!-- IPv6-адрес TUN на сервере -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="IPv6-адрес туннеля (TUN) на сервере"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <EditText
+                android:id="@+id/edit_tun_ipv6"
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:background="#FFFFFF"
+                android:padding="12dp"
+                android:hint="fd00::1"
+                android:inputType="textUri"
+                android:text="fd00::1"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Клиенту автоматически выдаётся парный адрес fd00::2. Это приватные адреса внутри туннеля, они не видны в интернете."
+                android:textSize="11sp"
+                android:textColor="#718096"
+                android:layout_marginBottom="12dp" />
+
+            <!-- Свой публичный IPv6 (информативно) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Публичный IPv6 этого устройства"
+                android:textSize="14sp"
+                android:textColor="#4A5568"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:id="@+id/tv_self_ipv6"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="—"
+                android:textSize="13sp"
+                android:textColor="#2B6CB0"
+                android:fontFamily="monospace"
+                android:background="#EDF2F7"
+                android:padding="10dp"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="⚠ Убедитесь, что порт проброшен на роутере (если устройство за NAT) либо что оператор пропускает входящие на этот IPv6."
+                android:textSize="12sp"
+                android:textColor="#DD6B20"
+                android:layout_marginBottom="8dp" />
+
+            <!-- ★ НОВОЕ: Кнопка теста сети и результат (только для сервера) -->
+            <Button
+                android:id="@+id/btn_test_network"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Тест сети (только сервер)"
+                android:backgroundTint="#38A169"
+                android:textColor="#FFFFFF"
+                android:enabled="false"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/tv_test_network_result"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:background="#EDF2F7"
+                android:textSize="12sp"
+                android:fontFamily="monospace"
+                android:visibility="gone"
+                android:text=""
+                android:layout_marginBottom="8dp" />
+
+        </LinearLayout>
+
+        <!-- ============ Кнопки ============ -->
+        <Button
+            android:id="@+id/btn_start_tunnel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Запустить VPN"
+            android:backgroundTint="#4C51BF"
+            android:textColor="#FFFFFF"
+            android:layout_marginBottom="12dp" />
+
+        <Button
+            android:id="@+id/btn_stop_tunnel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Остановить VPN"
+            android:backgroundTint="#E53E3E"
+            android:textColor="#FFFFFF"
+            android:enabled="false"
+            android:layout_marginBottom="24dp" />
+
+        <!-- ============ Информация ============ -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Информация"
+            android:textSize="16sp"
+            android:textColor="#4A5568"
+            android:layout_marginBottom="12dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="• Клиент: подключается к VPN-шлюзу по указанному адресу (IPv6 приоритетно, если выбран приоритет «IPv6»), получает IP 10.0.0.X и IPv6 fd00::X в VPN-подсети."
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="• Сервер: слушает входящие соединения на указанном порту сразу по IPv4 и IPv6 (dual-stack), выдаёт клиентам уникальные адреса в обеих подсетях."
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="• Проверка «Доступность шлюза»: с устройства-клиента пытается подключиться к серверу по IPv6 и IPv4 — показывает, пропускает ли оператор входящие IPv6-соединения. Полезно для диагностики."
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="• «Тест сети» (только в режиме сервера): проверяет, что сервер сам имеет интернет, SOCKS5 слушает порт 1080 и реально проксирует трафик, и что DNS работает. Запускайте после старта VPN-сервера перед тем, как звать клиента."
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="• Внутри туннеля оба семейства пакетов (IPv4 и IPv6) переносятся одним каналом. Наружу в интернет клиент выходит через SIM-карту шлюза."
+            android:textSize="13sp"
+            android:textColor="#718096" />
+
+    </LinearLayout>
+</ScrollView>

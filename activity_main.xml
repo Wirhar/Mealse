@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#F0F4F8">
+
+    <!-- ============ Шапка ============ -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="12dp">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Mealse — Сеть доверия"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#2D3748" />
+
+        <!-- ★ НОВОЕ: кнопка браузера слева от настроек -->
+        <ImageButton
+            android:id="@+id/btn_browser"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:src="@drawable/ic_browser"
+            android:background="@drawable/circle_action"
+            android:contentDescription="Браузер"
+            android:scaleType="centerInside"
+            android:padding="10dp"
+            android:layout_marginEnd="8dp" />
+
+        <ImageButton
+            android:id="@+id/btn_settings"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:src="@drawable/ic_settings"
+            android:background="@drawable/circle_action"
+            android:contentDescription="Настройки"
+            android:scaleType="centerInside"
+            android:padding="10dp" />
+    </LinearLayout>
+
+    <!-- ============ Блок статусов ============ -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#FFFFFF"
+        android:padding="12dp"
+        android:layout_marginBottom="12dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Статус сервисов"
+            android:textSize="13sp"
+            android:textColor="#718096"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Сервер -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:id="@+id/tv_status_server"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="⚪ Сервер — выключен"
+                android:textSize="14sp"
+                android:textColor="#2D3748" />
+
+            <ImageButton
+                android:id="@+id/btn_server_toggle"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_play"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Запустить сервер"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+
+            <ImageButton
+                android:id="@+id/btn_add_node"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_node"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Данные этого устройства"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+        </LinearLayout>
+
+        <!-- Файлы -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:id="@+id/tv_status_files"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="⚪ Файлы — выключены"
+                android:textSize="14sp"
+                android:textColor="#2D3748"
+                android:clickable="true"
+                android:focusable="true"
+                android:background="?android:attr/selectableItemBackground"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp" />
+
+            <ImageButton
+                android:id="@+id/btn_files_toggle"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_play"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Передача файлов"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+
+            <ImageButton
+                android:id="@+id/btn_files_manager"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_file"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Файловый менеджер"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+        </LinearLayout>
+
+        <!-- Звонок -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:id="@+id/tv_status_call"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="⚪ Звонок — не активен"
+                android:textSize="14sp"
+                android:textColor="#2D3748" />
+
+            <ImageButton
+                android:id="@+id/btn_call_action"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_call"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Позвонить"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+
+            <ImageButton
+                android:id="@+id/btn_check_node"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_check_circle"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Проверить узел"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+        </LinearLayout>
+
+        <!-- VPN -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="6dp">
+
+            <TextView
+                android:id="@+id/tv_status_vpn"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="⚪ VPN — не подключён"
+                android:textSize="14sp"
+                android:textColor="#2D3748" />
+
+            <ImageButton
+                android:id="@+id/btn_vpn_toggle"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_play"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Запустить VPN"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+
+            <ImageButton
+                android:id="@+id/btn_vpn_settings"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_vpn"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Настройки VPN"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+        </LinearLayout>
+
+        <!-- Wi-Fi Direct -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/tv_status_wifi_direct"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="⚪ Wi-Fi Direct — обнаружение выключено"
+                android:textSize="14sp"
+                android:textColor="#2D3748" />
+
+            <ImageButton
+                android:id="@+id/btn_wifidirect_toggle"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_wifi_direct"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Wi-Fi Direct обнаружение"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+
+            <ImageButton
+                android:id="@+id/btn_wifidirect_settings"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:src="@drawable/ic_settings"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:contentDescription="Wi-Fi Direct настройки"
+                android:scaleType="centerInside"
+                android:padding="6dp" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- ============ Список узлов ============ -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Доверенные узлы"
+        android:textSize="13sp"
+        android:textColor="#718096"
+        android:layout_marginBottom="4dp"
+        android:layout_marginStart="4dp" />
+
+    <ListView
+        android:id="@+id/nodes_list_view"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="4dp"
+        android:background="#FFFFFF"
+        android:divider="#E2E8F0"
+        android:dividerHeight="1dp" />
+
+</LinearLayout>

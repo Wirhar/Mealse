@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/te_action_save"
+        android:title="💾 Сохранить"
+        android:icon="@drawable/ic_check"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/te_action_search"
+        android:title="🔍 Поиск"
+        android:icon="@drawable/ic_search"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/te_action_info"
+        android:title="ℹ Информация"
+        android:icon="@drawable/ic_info"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/te_action_save_as"
+        android:title="💾 Сохранить как..."
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/te_action_rename"
+        android:title="✏ Переименовать"
+        app:showAsAction="never" />
+
+</menu>

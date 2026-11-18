@@ -1,0 +1,281 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1E1E1E">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Toolbar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#16213E">
+
+            <ImageButton
+                android:id="@+id/bs_btn_back"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_arrow_up"
+                android:rotation="-90"
+                android:contentDescription="Назад"
+                android:scaleType="centerInside" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="⚙ Настройки браузера"
+                android:textColor="#FFFFFF"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+        </LinearLayout>
+
+        <!-- Домашняя страница -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Домашняя страница"
+            android:textColor="#A0AEC0"
+            android:textSize="12sp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="16dp" />
+
+        <EditText
+            android:id="@+id/bs_edit_home"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="16dp"
+            android:background="#0F3460"
+            android:padding="12dp"
+            android:hint="https://www.yandex.ru/"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#718096"
+            android:inputType="textUri" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333333" />
+
+        <!-- Поисковик -->
+        <LinearLayout
+            android:id="@+id/bs_row_search_engine"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp"
+            android:background="?android:attr/selectableItemBackground">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Поисковик"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/bs_tv_search_engine"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Яндекс"
+                android:textColor="#A0AEC0"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <!-- ★ Блокировка рекламы -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Блокировка рекламы"
+                    android:textColor="#FFFFFF"
+                    android:textSize="15sp" />
+
+                <TextView
+                    android:id="@+id/bs_tv_adblock_stats"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Заблокировано: 0 · Экономия: 0 B"
+                    android:textColor="#A0AEC0"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/bs_switch_adblock"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333333" />
+
+        <LinearLayout
+            android:id="@+id/bs_row_user_agent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp"
+            android:background="?android:attr/selectableItemBackground">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="User-Agent"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/bs_tv_user_agent"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📱 Мобильный"
+                android:textColor="#A0AEC0"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <!-- Шлюз -->
+        <LinearLayout
+            android:id="@+id/bs_row_gateway"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:background="?android:attr/selectableItemBackground">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Шлюз"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/bs_tv_gateway"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="🌐 Напрямую"
+                android:textColor="#A0AEC0"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333333" />
+
+        <!-- Кэш -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Кэш прокси"
+                android:textColor="#FFFFFF"
+                android:textSize="15sp" />
+
+            <TextView
+                android:id="@+id/bs_tv_cache_size"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0 B"
+                android:textColor="#A0AEC0"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/bs_btn_clear_cache"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="Очистить"
+                android:textSize="12sp"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#4C51BF" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333333" />
+
+        <!-- Очистка данных -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Очистка данных"
+            android:textColor="#A0AEC0"
+            android:textSize="12sp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="16dp" />
+
+        <Button
+            android:id="@+id/bs_btn_clear_history"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="8dp"
+            android:text="📜 Очистить историю"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#E53E3E" />
+
+        <Button
+            android:id="@+id/bs_btn_clear_bookmarks"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="8dp"
+            android:text="⭐ Очистить закладки"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#E53E3E" />
+
+        <Button
+            android:id="@+id/bs_btn_clear_passwords"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="8dp"
+            android:text="🔐 Очистить пароли"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#E53E3E" />
+
+        <Button
+            android:id="@+id/bs_btn_set_default_browser"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_margin="8dp"
+            android:text="🌐 Сделать браузером по умолчанию"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#4C51BF" />
+
+    </LinearLayout>
+</ScrollView>
