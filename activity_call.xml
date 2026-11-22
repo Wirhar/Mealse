@@ -1,15 +1,43 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  activity_call.xml — экран звонка CallActivity.
+
+  Структура (FrameLayout):
+    1. WebView (webview_call) — на весь экран. Сюда CallActivity через
+       attachRetainedWebView() подставит retained sWebView (static, живёт
+       вне Activity). Placeholder <WebView> нужен только чтобы findViewById
+       вернул не-null и мы знали позицию в layout.
+    2. Кнопка-переключатель чата (chat_btn_toggle) — правый нижний угол,
+       поверх WebView.
+    3. Оверлей чата (chat_overlay) — LinearLayout, скрыт по умолчанию:
+       - шапка с кнопкой «свернуть» (chat_btn_close);
+       - пустое состояние (chat_empty);
+       - список сообщений (chat_list);
+       - панель ввода: скрепка (chat_btn_attach), поле (chat_input),
+         отправка (chat_btn_send).
+
+  ★ Кнопка chat_btn_attach обязательна: без неё CallActivity.initChatViews()
+    логирует warn и вложения в чате звонка недоступны (хотя pick-mode в
+    FileManagerActivity полностью реализован).
+-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- WebView звонка — на весь экран, как было -->
+    <!-- ============================================================
+         1. WebView звонка — на весь экран.
+         ★ Placeholder: CallActivity.attachRetainedWebView() заменит его
+         на retained sWebView (static). Если движок уже жив (reuse-ветка
+         onCreate) — просто detach/attach без пересоздания.
+         ============================================================ -->
     <WebView
         android:id="@+id/webview_call"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- ★ Шаг 14.1: кнопка-переключатель чата (поверх WebView, правый нижний угол) -->
+    <!-- ============================================================
+         2. Кнопка-переключатель чата (правый нижний угол, поверх WebView).
+         ============================================================ -->
     <ImageButton
         android:id="@+id/chat_btn_toggle"
         android:layout_width="52dp"
@@ -24,7 +52,9 @@
         android:padding="12dp"
         android:elevation="6dp" />
 
-    <!-- ★ Шаг 14.1: оверлей чата (по умолчанию скрыт) -->
+    <!-- ============================================================
+         3. Оверлей чата (по умолчанию скрыт).
+         ============================================================ -->
     <LinearLayout
         android:id="@+id/chat_overlay"
         android:layout_width="match_parent"
@@ -70,7 +100,7 @@
                 android:tint="#FFFFFF" />
         </LinearLayout>
 
-        <!-- Пустой чат -->
+        <!-- Пустое состояние чата -->
         <TextView
             android:id="@+id/chat_empty"
             android:layout_width="match_parent"
@@ -81,7 +111,7 @@
             android:textColor="#718096"
             android:visibility="gone" />
 
-        <!-- Список сообщений (reverse, max высота ~40% экрана) -->
+        <!-- Список сообщений -->
         <ListView
             android:id="@+id/chat_list"
             android:layout_width="match_parent"
@@ -91,7 +121,7 @@
             android:transcriptMode="normal"
             android:background="#F0F4F8" />
 
-        <!-- Панель ввода -->
+        <!-- Панель ввода: скрепка + поле + отправка -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -103,7 +133,8 @@
             android:paddingTop="8dp"
             android:paddingBottom="8dp">
 
-            <!-- ★ НОВОЕ: кнопка «Прикрепить» (скрепка) -->
+            <!-- ★ Кнопка «Прикрепить» (скрепка). Без неё chat_btn_attach == null
+                 в CallActivity.initChatViews() → вложения в чате звонка не работают. -->
             <ImageButton
                 android:id="@+id/chat_btn_attach"
                 android:layout_width="44dp"
@@ -112,7 +143,8 @@
                 android:background="?android:attr/selectableItemBackgroundBorderless"
                 android:contentDescription="Прикрепить файл"
                 android:scaleType="centerInside"
-                android:padding="8dp" />
+                android:padding="8dp"
+                android:visibility="visible" />
 
             <EditText
                 android:id="@+id/chat_input"
