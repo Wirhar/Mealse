@@ -44,6 +44,8 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <!-- ============================================================
          Wi-Fi Direct
@@ -298,6 +300,12 @@
             android:name=".filemanager.server.RemoteFsService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".CallService"
+            android:exported="false"
+            android:foregroundServiceType="camera|microphone" />
+
 
         <!-- ============================================================
              Receivers
