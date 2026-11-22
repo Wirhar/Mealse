@@ -46,6 +46,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import java.util.LinkedHashMap;
+
 /**
  * HTTP-сервер на порту 8081.
  *
@@ -74,6 +76,14 @@ public class ServerService extends Service {
   private static final int PORT = 8081;
   private static final int NOTIF_ID = 101;
   private static final String CHANNEL_ID = "MealseServerChannel";
+
+  /**
+   * ★ НОВОЕ: cooldown по недавно завершённым call_id. Если после bye в течение этого окна приходит повторный offer с тем же call_id — игнорируем (страховка на время миграции: пока retained-движок не внедрён, onDestroy мог успеть сбросить callActive до повторного offer).
+   */
+  private static final long CALL_COOLDOWN_MS = 60_000L;
+
+  /** ★ НОВОЕ: максимальный размер карты cooldown (prune по timestamp). */
+  private static final int CALL_COOLDOWN_MAX = 32;
 
   /**
    * Лимит тела для /signal/* (кроме /signal/file) и /ping. 20 МБ — base64 от вложения ≤ 10 МБ (≈ 13.3 МБ) + запас.
@@ -134,6 +144,18 @@ public class ServerService extends Service {
     }
   }
 
+  /**
+   * ★ НОВОЕ: недавно завершённые call_id → timestamp завершения. Заполняется в handleSignal (ветка bye) до broadcast и в sendBusyBye. Проверяется в handleIncomingOffer: если callId в карте и возраст < CALL_COOLDOWN_MS — offer игнорируется (повторный после bye). Prune — по размеру (CALL_COOLDOWN_MAX) и по возрасту.
+   */
+  private final Map<String, Long> recentlyEndedCalls = new LinkedHashMap<String, Long>(16, 0.75f,
+      true) {
+    @Override
+    protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
+      return size() > CALL_COOLDOWN_MAX
+          || (System.currentTimeMillis() - eldest.getValue()) > CALL_COOLDOWN_MS;
+    }
+  };
+
   // ============================================================
   // Lifecycle
   // ============================================================
@@ -180,6 +202,11 @@ public class ServerService extends Service {
   /**
    * ★ Шаг 16.8.5: очищает getCacheDir()/incoming/ от «зависших» tmp-файлов. tmp создаётся handleFileRoute и удаляется MessageReceiver (moveFromFile). Если процесс упал между этими шагами — файл остаётся; удаляем при старте.
    */
+  /**
+   * ★ ИЗМЕНЕНО: не удаляем все подряд. Только: - *.part — незавершённые (сборка WD-чанков); - файлы старше 1 часа — зависшие tmp от handleFileRoute, которые MessageReceiver так и не забрал (процесс упал между записью tmp и moveFromFile).
+   *
+   * Так мы не теряем файл, который ещё ждёт moveFromFile, если сервис перезапустился сразу после приёма.
+   */
   private void cleanupIncomingDir() {
     try {
       File incomingDir = new File(getCacheDir(), "incoming");
@@ -188,13 +215,26 @@ public class ServerService extends Service {
       File[] files = incomingDir.listFiles();
       if (files == null)
         return;
-      int n = 0;
+      long now = System.currentTimeMillis();
+      long staleThresholdMs = 60L * 60L * 1000L; // 1 час
+      int deleted = 0;
+      int kept = 0;
       for (File f : files) {
-        if (f.isFile() && f.delete())
-          n++;
+        if (!f.isFile())
+          continue;
+        String name = f.getName();
+        boolean isPart = name.endsWith(".part");
+        long age = now - f.lastModified();
+        if (isPart || age > staleThresholdMs) {
+          if (f.delete())
+            deleted++;
+        } else {
+          kept++;
+        }
       }
       if (log != null)
-        log.log("cleanupIncomingDir: удалено " + n + " tmp-файлов");
+        log.log("cleanupIncomingDir: удалено " + deleted + " (.part/старше 1ч), оставлено " + kept
+            + " (свежие tmp для MessageReceiver)");
     } catch (Exception e) {
       if (log != null)
         log.warn("cleanupIncomingDir: " + e.getMessage());
@@ -1090,6 +1130,9 @@ public class ServerService extends Service {
   // Обработка сигналов (offer / answer / candidate / bye / message)
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО: для type="bye" перед broadcast помечаем call_id в cooldown. Broadcast НЕ пропускаем — приёмнику тоже нужен bye, чтобы снять свой callActive и записать свой cooldown.
+   */
   private void handleSignal(String path, String body, BufferedWriter out, String clientIp)
       throws IOException {
 
@@ -1201,12 +1244,18 @@ public class ServerService extends Service {
         log.log("handleSignal: message → прямой вызов MessageReceiver");
         Intent intent = new Intent(ACTION_SIGNAL);
         intent.putExtra(EXTRA_SIGNAL_JSON, body);
+        intent.setPackage(getPackageName()); // ★ консистентность с broadcastSignal
         new com.my.mealse.messenger.receiver.MessageReceiver().onReceive(this, intent);
         log.log("✓ handleSignal: MessageReceiver.onReceive выполнен");
       } catch (Exception e) {
         log.logError("Ошибка прямого вызова MessageReceiver", e);
       }
     } else {
+      // ★ НОВОЕ: на bye — пометить call_id в cooldown ДО broadcast.
+      // Не return: приёмнику тоже нужен bye.
+      if ("bye".equals(type)) {
+        markCallEndedCooldown(callId);
+      }
       try {
         broadcastSignal(body, type);
       } catch (Exception e) {
@@ -1274,6 +1323,9 @@ public class ServerService extends Service {
         + (fingerprintConflict ? ", ⚠ fingerprint conflict" : ""));
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: перед обработкой offer проверяем cooldown по call_id. Если этот call_id завершён < 60 с назад — игнорируем (страховка от «зомби-перезвонов», пока retained-движок не внедрён: onDestroy мог сбросить callActive до повторного offer, и дедуп по isCallActive не сработает).
+   */
   private void handleIncomingOffer(JsonObject obj, String rawJson, String clientIp) {
     log("handleIncomingOffer START");
 
@@ -1303,6 +1355,13 @@ public class ServerService extends Service {
 
     log("Активный звонок: isCallActive=" + isCallActive + ", activeCallId="
         + shortId(activeCallId));
+
+    // ★ НОВОЕ: cooldown по недавно завершённым call_id — до if (isCallActive)
+    if (isCallInCooldown(callId)) {
+      log.warn("handleIncomingOffer: call_id=" + shortId(callId)
+          + " в cooldown после bye — игнорирую повторный offer");
+      return;
+    }
 
     if (isCallActive) {
       if (callId != null && callId.equals(activeCallId)) {
@@ -1463,6 +1522,9 @@ public class ServerService extends Service {
   // busy-bye
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО: после busy-bye помечаем call_id в cooldown — если вызывающий по таймауту повторит offer, мы его проигнорируем (не покажем входящий повторно).
+   */
   private void sendBusyBye(String fromFingerprint, String clientIp, String callId) {
     log("sendBusyBye START: fromFingerprint=" + fromFingerprint + ", clientIp=" + clientIp);
 
@@ -1487,11 +1549,15 @@ public class ServerService extends Service {
 
     if (node == null || node.getIpAddress() == null || node.getIpAddress().isEmpty()) {
       log("sendBusyBye: узел не найден — bye не отправляем");
+      // ★ Всё равно помечаем call_id в cooldown: если вызывающий повторит
+      // offer, мы не должны показать входящий повторно.
+      markCallEndedCooldown(callId);
       return;
     }
 
     if (cachedSelfIp != null && cachedSelfIp.equals(node.getIpAddress())) {
       log.warn("sendBusyBye: node.ip == self IP (" + cachedSelfIp + ") — не отправляем");
+      markCallEndedCooldown(callId);
       return;
     }
 
@@ -1516,9 +1582,14 @@ public class ServerService extends Service {
       svc.putExtra(ConnectionManager.EXTRA_SIGNAL_BODY, bye.toString());
       startForegroundService(svc);
 
+      // ★ НОВОЕ: пометить call_id в cooldown
+      markCallEndedCooldown(callId);
+
       log("✓ busy-bye отправлен " + node.getName() + " (" + node.getKey() + ")");
     } catch (Exception e) {
       logError("Ошибка отправки busy-bye", e);
+      // даже при ошибке — пометить, чтобы не показать входящий повторно
+      markCallEndedCooldown(callId);
     }
   }
 
@@ -1546,26 +1617,30 @@ public class ServerService extends Service {
   /**
    * Читает JSON-body как байты (для /signal/*, /proxy/*). При length > maxSize бросает BodyTooLargeException → 413.
    */
+  /**
+   * ★ ИЗМЕНЕНО: Long.parseLong + BodyTooLargeException вместо молчаливого return new byte[0] (который давал 400 «Пустое тело» вместо корректного 413).
+   */
   private byte[] readBodyBytes(InputStream in, Map<String, String> headers, int maxSize)
       throws IOException, BodyTooLargeException {
     String clStr = headers.get("content-length");
     if (clStr == null)
       return new byte[0];
 
-    int length;
+    long lengthLong;
     try {
-      length = Integer.parseInt(clStr);
+      lengthLong = Long.parseLong(clStr);
     } catch (NumberFormatException e) {
-      return new byte[0];
+      throw new BodyTooLargeException("bad content-length: " + clStr);
     }
 
-    if (length < 0) {
-      throw new BodyTooLargeException("negative content-length: " + length);
+    if (lengthLong < 0) {
+      throw new BodyTooLargeException("negative content-length: " + lengthLong);
     }
-    if (length > maxSize) {
-      throw new BodyTooLargeException("body " + length + "B > max " + maxSize + "B");
+    if (lengthLong > maxSize) {
+      throw new BodyTooLargeException("body " + lengthLong + "B > max " + maxSize + "B");
     }
 
+    int length = (int) lengthLong;
     byte[] buf = new byte[length];
     int read = 0;
     while (read < length) {
@@ -1760,6 +1835,47 @@ public class ServerService extends Service {
     if (id == null)
       return "?";
     return id.length() > 8 ? id.substring(0, 8) : id;
+  }
+
+  // ============================================================
+  // ★ НОВОЕ: cooldown по недавно завершённым call_id
+  // ============================================================
+
+  /** Помечает call_id как недавно завершённый (для cooldown). */
+  private void markCallEndedCooldown(String callId) {
+    if (callId == null || callId.isEmpty())
+      return;
+    synchronized (recentlyEndedCalls) {
+      recentlyEndedCalls.put(callId, System.currentTimeMillis());
+      // prune по возрасту (removeEldestEntry уже чистит по размеру)
+      long now = System.currentTimeMillis();
+      java.util.Iterator<Map.Entry<String, Long>> it = recentlyEndedCalls.entrySet().iterator();
+      while (it.hasNext()) {
+        Map.Entry<String, Long> e = it.next();
+        if (now - e.getValue() > CALL_COOLDOWN_MS)
+          it.remove();
+      }
+    }
+    log("markCallEndedCooldown: " + shortId(callId) + " (всего в cooldown="
+        + recentlyEndedCalls.size() + ")");
+  }
+
+  /** true, если call_id недавно завершён (в пределах CALL_COOLDOWN_MS). */
+  private boolean isCallInCooldown(String callId) {
+    if (callId == null || callId.isEmpty())
+      return false;
+    synchronized (recentlyEndedCalls) {
+      Long ts = recentlyEndedCalls.get(callId);
+      if (ts == null)
+        return false;
+      long age = System.currentTimeMillis() - ts;
+      if (age > CALL_COOLDOWN_MS) {
+        recentlyEndedCalls.remove(callId);
+        return false;
+      }
+      log("isCallInCooldown: " + shortId(callId) + " — age=" + age + "мс");
+      return true;
+    }
   }
 
   private static String redactUrl(String url) {

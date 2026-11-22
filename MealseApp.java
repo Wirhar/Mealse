@@ -25,12 +25,15 @@ import com.my.mealse.util.WifiDirectManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileWriter;              // ★ НОВОЕ
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
-import java.util.Date;
+import java.util.Map;
 
 /**
  * Application-класс Mealse.
@@ -42,10 +45,30 @@ public class MealseApp extends Application {
   private static final String TAG = "MealseApp";
   private static final int REQ_MANAGE_STORAGE = 1001;
 
+  /**
+   * ★ НОВОЕ: cooldown по недавно завершённым call_id для WD-пути. Симметрично ServerService.CALL_COOLDOWN_MS — иначе защита половинчатая (HTTP видит свой cooldown, WD — нет).
+   */
+  private static final long CALL_COOLDOWN_MS = 60_000L;
+
+  /** ★ НОВОЕ: максимальный размер карты cooldown (prune по timestamp). */
+  private static final int CALL_COOLDOWN_MAX = 32;
+
   private WifiDirectManager wifiDirectManager;
   private WifiDirectManager.Listener wifiDirectIncomingListener;
 
   private MessageReceiver messageReceiver;
+
+  /**
+   * ★ НОВОЕ: имя файла для crash-лога, который пишет MealseApp (отдельно от MealseLogger.CrashHandler → crash.log).
+   *
+   * Раньше оба обработчика писали в crash.log → дублирование. Теперь: MealseLogger.CrashHandler → crash.log (форматированный), MealseApp → crash_direct.log (минимальный, с fsync).
+   */
+  private static final String CRASH_DIRECT_LOG_NAME = "crash_direct.log";
+
+  /**
+   * ★ НОВОЕ: недавно завершённые call_id (WD-путь). Заполняется в handleWifiDirectSignal при bye (и в offer-ветке при busy), проверяется в handleWifiDirectSignal при повторном offer. Симметрично ServerService.recentlyEndedCalls.
+   */
+  private final Map<String, Long> recentlyEndedCalls = new HashMap<>();
 
   @Override
   public void onCreate() {
@@ -64,7 +87,7 @@ public class MealseApp extends Application {
     checkStoragePermission(log);
     installCrashHandler();
     MealseLogger.installCrashHandler(this);
-    
+
     try {
       wifiDirectManager = new WifiDirectManager(this);
       log.log("WifiDirectManager создан: supported=" + wifiDirectManager.isWifiDirectSupported());
@@ -176,8 +199,17 @@ public class MealseApp extends Application {
       public void onDiscoveryStopped() {
       }
 
+      // MealseApp.wifiDirectIncomingListener:
       @Override
       public void onConnected(WifiDirectManager.Peer remote, boolean isGroupOwner) {
+        try {
+          if (remote != null && remote.deviceId != null) {
+            DeliveryScheduler.get(getApplicationContext()).retryForDeviceId(remote.deviceId);
+          }
+        } catch (Exception e) {
+          MealseLogger.get(getApplicationContext(), "MealseApp")
+              .warn("onConnected: retryForDeviceId: " + e.getMessage());
+        }
       }
 
       @Override
@@ -218,6 +250,9 @@ public class MealseApp extends Application {
    *
    * ★ ИСПРАВЛЕНО (шаг 17.1): - hello / hello_ack — игнор. - file_chunk — ТОЛЬКО прямой вызов MessageReceiver (broadcast упадёт с TransactionTooLargeException: JSON-чанк 512 КБ ≈ 700К символов не влезает в Binder ~1 МБ). - message — ТОЛЬКО прямой вызов MessageReceiver (убираем двойной вызов ack DELIVERED/READ; broadcast + direct давали дубли). - offer — IncomingCallActivity (только если звонок не активен). - candidate / answer / bye — broadcast ACTION_SIGNAL для CallActivity.signalReceiver (если звонок активен); иначе игнор.
    */
+  /**
+   * ★ ИЗМЕНЕНО: - candidate / answer / bye: на bye — markCallEndedCooldown(callId) перед broadcast (не return: broadcast нужен и собеседнику). - offer: cooldown-проверка ДО isCallActive; isCallActivityAlive(callId) — реальная проверка через CallActivity.isCallEngineActive. - busy: markCallEndedCooldown, чтобы повторный offer не показал входящий снова. - message / file_chunk — без изменений (прямой MessageReceiver).
+   */
   private void handleWifiDirectSignal(String json) {
     MealseLogger log = MealseLogger.get(this, "MealseApp");
 
@@ -256,6 +291,7 @@ public class MealseApp extends Application {
         try {
           Intent directIntent = new Intent(ServerService.ACTION_SIGNAL);
           directIntent.putExtra(ServerService.EXTRA_SIGNAL_JSON, json);
+          directIntent.setPackage(getPackageName());
           new com.my.mealse.messenger.receiver.MessageReceiver().onReceive(this, directIntent);
           log.log("✓ handleWifiDirectSignal: MessageReceiver.onReceive (message) выполнен");
         } catch (Exception e) {
@@ -285,6 +321,7 @@ public class MealseApp extends Application {
         try {
           Intent directIntent = new Intent(ServerService.ACTION_SIGNAL);
           directIntent.putExtra(ServerService.EXTRA_SIGNAL_JSON, json);
+          directIntent.setPackage(getPackageName());
           new com.my.mealse.messenger.receiver.MessageReceiver().onReceive(this, directIntent);
           log.log("✓ handleWifiDirectSignal: MessageReceiver.onReceive (file_chunk) выполнен");
         } catch (Exception e) {
@@ -295,12 +332,27 @@ public class MealseApp extends Application {
 
       // ============================================================
       // candidate / answer / bye — broadcast для CallActivity.signalReceiver
+      // ★ ИЗМЕНЕНО: на bye — markCallEndedCooldown ДО broadcast (не return)
       // ============================================================
       if ("candidate".equals(type) || "answer".equals(type) || "bye".equals(type)) {
         CallStateManager csm = new CallStateManager(this);
         if (!csm.isCallActive()) {
           log.log("handleWifiDirectSignal: " + type + " — нет активного звонка, игнорирую");
+          // ★ даже без активного звонка на bye — пометить call_id,
+          // чтобы последующий offer не показал входящий повторно
+          if ("bye".equals(type)) {
+            String byeCallId = obj.has("call_id") && !obj.get("call_id").isJsonNull()
+                ? obj.get("call_id").getAsString()
+                : null;
+            markCallEndedCooldown(byeCallId);
+          }
           return;
+        }
+        if ("bye".equals(type)) {
+          String byeCallId = obj.has("call_id") && !obj.get("call_id").isJsonNull()
+              ? obj.get("call_id").getAsString()
+              : null;
+          markCallEndedCooldown(byeCallId);
         }
         log.log("handleWifiDirectSignal: " + type
             + " → broadcast ACTION_SIGNAL для CallActivity.signalReceiver");
@@ -326,26 +378,6 @@ public class MealseApp extends Application {
 
       log.log("handleWifiDirectSignal: ✓ получен offer — обрабатываю");
 
-      CallStateManager csm = new CallStateManager(this);
-      boolean callActive = csm.isCallActive();
-      String activeCallId = csm.getActiveCallId();
-      log.log("  CallStateManager: isCallActive=" + callActive + ", activeCallId="
-          + shortId(activeCallId));
-
-      if (callActive) {
-        boolean callActivityAlive = isCallActivityAlive();
-        log.log("  CallStateManager: callActivityAlive=" + callActivityAlive);
-
-        if (!callActivityAlive) {
-          log.warn("handleWifiDirectSignal: флаг звонка висит, но CallActivity мёртв — сбрасываю");
-          csm.clearCallActive();
-        } else {
-          log.warn("handleWifiDirectSignal: ❌ звонок уже активен (" + shortId(activeCallId)
-              + ") — игнорирую offer");
-          return;
-        }
-      }
-
       String callId = obj.has("call_id") && !obj.get("call_id").isJsonNull()
           ? obj.get("call_id").getAsString()
           : null;
@@ -363,6 +395,37 @@ public class MealseApp extends Application {
       if (callId == null || callId.isEmpty()) {
         log.warn("handleWifiDirectSignal: offer без call_id — игнорирую");
         return;
+      }
+
+      // ★ НОВОЕ: cooldown WD-пути — до isCallActive
+      if (isCallInCooldown(callId)) {
+        log.warn("handleWifiDirectSignal: offer call_id=" + shortId(callId)
+            + " в cooldown после bye — игнорирую");
+        return;
+      }
+
+      CallStateManager csm = new CallStateManager(this);
+      boolean callActive = csm.isCallActive();
+      String activeCallId = csm.getActiveCallId();
+      log.log("  CallStateManager: isCallActive=" + callActive + ", activeCallId="
+          + shortId(activeCallId));
+
+      if (callActive) {
+        // ★ ИЗМЕНЕНО: реальная проверка движка для текущего activeCallId
+        boolean callEngineAlive = isCallActivityAlive(activeCallId);
+        log.log("  CallStateManager: callEngineAlive=" + callEngineAlive);
+
+        if (!callEngineAlive) {
+          log.warn("handleWifiDirectSignal: флаг звонка висит, но движок мёртв — сбрасываю");
+          csm.clearCallActive();
+        } else {
+          log.warn("handleWifiDirectSignal: ❌ звонок уже активен (" + shortId(activeCallId)
+              + ") — busy-bye + cooldown");
+          // ★ НОВОЕ: пометить call_id в cooldown, чтобы повторный offer
+          // от вызывающего не показал входящий снова
+          markCallEndedCooldown(callId);
+          return;
+        }
       }
 
       WifiDirectManager.Peer remote = wifiDirectManager != null ? wifiDirectManager.getRemotePeer()
@@ -413,15 +476,69 @@ public class MealseApp extends Application {
     log.log("════ handleWifiDirectSignal END ════");
   }
 
-  private boolean isCallActivityAlive() {
+  /**
+   * ★ ИЗМЕНЕНО: реальная проверка живости звонка — через CallActivity.isCallEngineActive(callId).
+   *
+   * Старое тело возвращало true при любом непустом callId — фиктивная проверка. Теперь движок (static sWebView) реально проверяется.
+   *
+   * @param callId конкретный callId или null — «жив ли хоть какой-то звонок».
+   */
+  private boolean isCallActivityAlive(String callId) {
     try {
-      CallStateManager csm = new CallStateManager(this);
-      String callId = csm.getActiveCallId();
-      if (callId == null)
-        return false;
-      return true;
-    } catch (Exception e) {
+      return CallActivity.isCallEngineActive(callId);
+    } catch (Throwable t) {
+      MealseLogger l = MealseLogger.get(getApplicationContext(), "MealseApp");
+      l.warn("isCallActivityAlive: " + t.getMessage());
       return false;
+    }
+  }
+
+  /** Обратная совместимость: без аргумента — проверка «есть ли активный движок». */
+  private boolean isCallActivityAlive() {
+    return isCallActivityAlive(null);
+  }
+
+  // ============================================================
+  // ★ НОВОЕ: cooldown по недавно завершённым call_id (WD-путь)
+  // ============================================================
+
+  /** Помечает call_id как недавно завершённый (WD-путь). */
+  private void markCallEndedCooldown(String callId) {
+    if (callId == null || callId.isEmpty())
+      return;
+    synchronized (recentlyEndedCalls) {
+      recentlyEndedCalls.put(callId, System.currentTimeMillis());
+      long now = System.currentTimeMillis();
+      java.util.Iterator<Map.Entry<String, Long>> it = recentlyEndedCalls.entrySet().iterator();
+      while (it.hasNext()) {
+        Map.Entry<String, Long> e = it.next();
+        if (now - e.getValue() > CALL_COOLDOWN_MS
+            || recentlyEndedCalls.size() > CALL_COOLDOWN_MAX) {
+          it.remove();
+        }
+      }
+    }
+    MealseLogger l = MealseLogger.get(getApplicationContext(), "MealseApp");
+    l.log("markCallEndedCooldown (WD): " + shortId(callId) + " (всего в cooldown="
+        + recentlyEndedCalls.size() + ")");
+  }
+
+  /** true, если call_id недавно завершён (WD-путь, в пределах CALL_COOLDOWN_MS). */
+  private boolean isCallInCooldown(String callId) {
+    if (callId == null || callId.isEmpty())
+      return false;
+    synchronized (recentlyEndedCalls) {
+      Long ts = recentlyEndedCalls.get(callId);
+      if (ts == null)
+        return false;
+      long age = System.currentTimeMillis() - ts;
+      if (age > CALL_COOLDOWN_MS) {
+        recentlyEndedCalls.remove(callId);
+        return false;
+      }
+      MealseLogger l = MealseLogger.get(getApplicationContext(), "MealseApp");
+      l.log("isCallInCooldown (WD): " + shortId(callId) + " — age=" + age + "мс");
+      return true;
     }
   }
 
@@ -525,6 +642,15 @@ public class MealseApp extends Application {
    *
    * Никаких исключений наружу — всё глотается, потому что мы уже в обработчике краха.
    */
+  /**
+   * ★ ИЗМЕНЕНО: пишет crash-лог в crash_direct.log (а не crash.log).
+   *
+   * Причина: MealseLogger.CrashHandler тоже пишет crash.log. Два обработчика (MealseApp.installCrashHandler + MealseLogger.installCrashHandler) давали ДВА crash-лога в одном файле — дублирование.
+   *
+   * Теперь: - MealseLogger.CrashHandler → crash.log (форматированный, с рамкой); - MealseApp.installCrashHandler → crash_direct.log (минимальный, с fsync — пишется ДО того, как defaultHandler убьёт процесс).
+   *
+   * Цепочка директорий: 1. /storage/emulated/0/MealseLogs/crash_direct.log (если MANAGE_EXTERNAL_STORAGE) 2. getExternalFilesDir()/MealseLogs/crash_direct.log 3. getFilesDir()/MealseLogs/crash_direct.log
+   */
   private void writeCrashLogDirect(Thread thread, Throwable throwable) {
     File logFile = null;
     try {
@@ -585,8 +711,11 @@ public class MealseApp extends Application {
   /**
    * ★ НОВОЕ: выбирает файл для crash-лога по цепочке директорий. Возвращает null, если ни одна директория не доступна для записи.
    */
+  /**
+   * ★ ИЗМЕНЕНО: возвращает crash_direct.log (а не crash.log) — чтобы не дублировать MealseLogger.CrashHandler.
+   */
   private File resolveCrashLogFile() {
-    String fileName = "crash.log";
+    String fileName = CRASH_DIRECT_LOG_NAME;
 
     // 1. Публичная папка (нужен MANAGE_EXTERNAL_STORAGE)
     try {
@@ -656,11 +785,13 @@ public class MealseApp extends Application {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: очищаем recentlyEndedCalls при завершении процесса (гигиена; на практике onTerminate почти не вызывается на реальных устройствах, но для эмулятора/тестов — полезно).
+   */
   @Override
   public void onTerminate() {
     try {
       if (messageReceiver != null) {
-        // BroadcastUtils.unregisterSafely(this, messageReceiver);
         messageReceiver = null;
       }
     } catch (Exception ignored) {
@@ -686,7 +817,16 @@ public class MealseApp extends Application {
     } catch (Exception ignored) {
     }
 
+    // ★ НОВОЕ: очистка cooldown
+    try {
+      synchronized (recentlyEndedCalls) {
+        recentlyEndedCalls.clear();
+      }
+    } catch (Exception ignored) {
+    }
+
     MealseLogger.closeAll();
     super.onTerminate();
   }
+
 }

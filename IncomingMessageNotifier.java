@@ -17,16 +17,28 @@ import com.my.mealse.util.MealseLogger;
  *
  * По образцу IncomingCallNotifier:
  *   - канал MealseMessagesChannel (IMPORTANCE_HIGH)
- *   - PendingIntent → ChatActivity (класс создаётся на Шаге 8/9;
- *     здесь используем Intent по имени класса через setClassName,
+ *   - PendingIntent → ChatActivity (по имени класса через setClassName,
  *     чтобы не было compile-time зависимости)
  *   - группировка по conversationId (setGroup)
  *   - при вызове из ChatActivity для того же conversationId — можно
  *     не показывать (проверка через ChatActivity.isConversationVisible —
  *     реализуется на Шаге 8; пока — всегда показываем)
  *
- * ★ Сейчас никто не вызывает show() — MessageReceiver будет вызывать
- *   на Шаге правки MealseApp (регистрация receiver). Класс спит.
+ * ★ ИЗМЕНЕНО:
+ *  1. setSmallIcon — через getIdentifier("ic_message") с fallback на
+ *     android.R.drawable.sym_action_chat. Раньше был ic_call — путаница
+ *     «иконка звонка для сообщения». ИСПОЛЬЗОВАНИЕ getIdentifier, а не
+ *     R.drawable.ic_message, — потому что если ic_message нет в
+ *     res/drawable/, R.drawable.ic_message — ОШИБКА КОМПИЛЯЦИИ
+ *     (static final int не сгенерирован). getIdentifier — runtime,
+ *     возвращает 0 если ресурса нет — безопасно.
+ *  2. chatIntent — добавлен FLAG_ACTIVITY_SINGLE_TOP. Стандарт для
+ *     уведомлений: CLEAR_TOP | SINGLE_TOP → onNewIntent для того же
+ *     диалога, не создаёт второй экземпляр ChatActivity.
+ *  3. summary — Math.abs(GROUP_KEY.hashCode()). String.hashCode() может
+ *     быть отрицательным (Integer.MIN_VALUE), NotificationManager.notify
+ *     принимает любой int, но для гигиены — abs.
+ *  4. show — preview fallback "" (getPreview() может вернуть null).
  */
 public class IncomingMessageNotifier {
 
@@ -73,7 +85,11 @@ public class IncomingMessageNotifier {
             Intent chatIntent = new Intent();
             chatIntent.setClassName(appContext, "com.my.mealse.messenger.ui.ChatActivity");
             chatIntent.putExtra("conversation_id", conversationId);
-            chatIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            // ★ ИЗМЕНЕНО: добавлен SINGLE_TOP. CLEAR_TOP | SINGLE_TOP →
+            // onNewIntent для того же диалога, не создаёт второй экземпляр.
+            chatIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
 
             int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -93,11 +109,17 @@ public class IncomingMessageNotifier {
             String title = (conversationTitle != null && !conversationTitle.isEmpty())
                 ? conversationTitle
                 : "Сообщение";
+            // ★ preview может быть null — fallback ""
             String text = message.getPreview();
+            if (text == null) text = "";
+
+            // ★ setSmallIcon через getIdentifier — безопасно, если
+            // ic_message нет в res/drawable/ (возвращает 0 → fallback).
+            int smallIcon = resolveSmallIcon();
 
             b.setContentTitle(title)
                 .setContentText(text)
-                .setSmallIcon(R.drawable.ic_call) // временно — иконка звонка
+                .setSmallIcon(smallIcon)
                 .setPriority(Notification.PRIORITY_HIGH)
                 .setCategory(Notification.CATEGORY_MESSAGE)
                 .setAutoCancel(true)
@@ -119,12 +141,15 @@ public class IncomingMessageNotifier {
                 }
                 summary.setContentTitle("Mealse")
                     .setContentText("Новые сообщения: " + unreadCount)
-                    .setSmallIcon(R.drawable.ic_call)
+                    .setSmallIcon(smallIcon)
                     .setGroup(GROUP_KEY)
                     .setGroupSummary(true)
                     .setAutoCancel(true);
 
-                nm.notify(GROUP_KEY.hashCode(), summary.build());
+                // ★ Math.abs(GROUP_KEY.hashCode()) — защита от
+                // отрицательного notifId (String.hashCode() может
+                // вернуть Integer.MIN_VALUE).
+                nm.notify(Math.abs(GROUP_KEY.hashCode()), summary.build());
             }
 
             nm.notify(notifId, b.build());
@@ -168,6 +193,35 @@ public class IncomingMessageNotifier {
                 log.logError("createChannel", e);
             }
         }
+    }
+
+    /**
+     * ★ НОВОЕ: выбирает иконку для уведомления о сообщении.
+     *
+     * ★ ИСПРАВЛЕНО (compile error ic_message cannot be resolved):
+     *   Раньше был return R.drawable.ic_message; — если ic_message нет
+     *   в res/drawable/, R.drawable.ic_message — ОШИБКА КОМПИЛЯЦИИ
+     *   (static final int не сгенерирован в R.java). try/catch (Throwable)
+     *   НЕ спасает от compile error.
+     *
+     *   Теперь через getIdentifier — runtime, без compile-зависимости:
+     *    - если ic_message есть в res/drawable/ — getIdentifier вернёт
+     *      ненулевой id, используем его;
+     *    - иначе — 0 → fallback android.R.drawable.sym_action_chat
+     *      (стандартная иконка чата, всегда есть).
+     *
+     *   Код компилируется даже без ic_message и не падает в runtime.
+     */
+    private int resolveSmallIcon() {
+        try {
+            int id = appContext.getResources().getIdentifier(
+                "ic_message", "drawable", appContext.getPackageName());
+            if (id != 0) {
+                return id;
+            }
+        } catch (Throwable ignored) {
+        }
+        return android.R.drawable.sym_action_chat;
     }
 
     private static String shortId(String id) {

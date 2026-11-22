@@ -21,17 +21,14 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
 /**
- * Отправляет сигнальные сообщения (offer / answer / candidate / bye)
- * на удалённое устройство по HTTP/1.1.
+ * Отправляет сигнальные сообщения (offer / answer / candidate / bye) на удалённое устройство по HTTP/1.1.
  *
- * ⚠️ КРИТИЧНО (Android 14+, SDK 34+):
- *   1. startForeground() вызывается ПЕРВЫМ делом в onStartCommand().
- *      Если этого не сделать, Android убивает процесс с
- *      ForegroundServiceDidNotStartInTimeException.
- *   2. stopSelf() / stopForeground() вызываются только когда счётчик
- *      активных отправок дошёл до нуля. Иначе 4 параллельных потока
- *      делают 4 stopSelf() и провоцируют race condition.
+ * ⚠️ КРИТИЧНО (Android 14+, SDK 34+): 1. startForeground() вызывается ПЕРВЫМ делом в onStartCommand(). Если этого не сделать, Android убивает процесс с ForegroundServiceDidNotStartInTimeException. 2. stopSelf() / stopForeground() вызываются только когда счётчик активных отправок дошёл до нуля. Иначе 4 параллельных потока делают 4 stopSelf() и провоцируют race condition.
  */
 public class ConnectionManager extends Service {
 
@@ -39,13 +36,13 @@ public class ConnectionManager extends Service {
 
   // ===== Actions =====
   public static final String ACTION_SEND_SIGNAL = "com.my.mealse.conn.SEND_SIGNAL";
-  public static final String ACTION_STOP        = "com.my.mealse.conn.STOP";
+  public static final String ACTION_STOP = "com.my.mealse.conn.STOP";
 
   // ===== Extras =====
-  public static final String EXTRA_TARGET_IP    = "target_ip";
-  public static final String EXTRA_TARGET_PORT  = "target_port";
-  public static final String EXTRA_SIGNAL_TYPE  = "signal_type";
-  public static final String EXTRA_SIGNAL_BODY  = "signal_body";
+  public static final String EXTRA_TARGET_IP = "target_ip";
+  public static final String EXTRA_TARGET_PORT = "target_port";
+  public static final String EXTRA_SIGNAL_TYPE = "signal_type";
+  public static final String EXTRA_SIGNAL_BODY = "signal_body";
 
   // ===== Notification =====
   private static final String CHANNEL_ID = "MealseConnChannel";
@@ -53,28 +50,35 @@ public class ConnectionManager extends Service {
 
   // ===== Таймауты =====
   private static final int CONNECT_TIMEOUT_MS = 10_000;
-  private static final int READ_TIMEOUT_MS    = 10_000;
+  private static final int READ_TIMEOUT_MS = 10_000;
 
   private MealseLogger log;
 
   /**
-   * ★ Счётчик активных отправок. Пока он > 0 — сервис жив.
-   * Когда опускается до 0 — можно вызывать stopForeground()/stopSelf().
-   * Это устраняет race condition при 4 параллельных startForegroundService().
+   * ★ Счётчик активных отправок. Пока он > 0 — сервис жив. Когда опускается до 0 — можно вызывать stopForeground()/stopSelf(). Это устраняет race condition при 4 параллельных startForegroundService().
    */
   private final AtomicInteger pendingSends = new AtomicInteger(0);
 
   /**
-   * ★ Флаг, что startForeground() уже был успешно вызван.
-   * Защищает от повторных вызовов startForeground() в onStartCommand()
-   * (Android 12+ ругается, если startForeground() вызывается повторно
-   *  без остановки предыдущего уведомления, но в нашем случае это безопасно —
-   *  просто обновляем уведомление).
+   * ★ Флаг, что startForeground() уже был успешно вызван. Защищает от повторных вызовов startForeground() в onStartCommand() (Android 12+ ругается, если startForeground() вызывается повторно без остановки предыдущего уведомления, но в нашем случае это безопасно — просто обновляем уведомление).
    */
   private volatile boolean foregroundStarted = false;
 
+  /**
+   * ★ НОВОЕ: ExecutorService вместо new Thread на каждый сигнал.
+   *
+   * Раньше: 6-10 потоков на один звонок (offer + answer + N candidate + bye). Потоки создаются/умирают, pendingSends скачет.
+   *
+   * Теперь: cached pool (потоки переиспользуются). shutdown() в onDestroy.
+   */
+  private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
+    Thread t = new Thread(r, "ConnHttp-" + System.nanoTime());
+    t.setDaemon(true);
+    return t;
+  });
+
   // ============================================================
-  //  Lifecycle
+  // Lifecycle
   // ============================================================
 
   @Override
@@ -104,6 +108,11 @@ public class ConnectionManager extends Service {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: ACTION_STOP → maybeStopSelf() вместо прямого stopForeground + stopSelf. Раньше ACTION_STOP игнорировал pendingSends — если шла активная отправка, сервис умирал, а поток продолжал работать вхолостую.
+   *
+   * maybeStopSelf() откладывает остановку, пока pendingSends > 0.
+   */
   @Override
   public int onStartCommand(Intent intent, int flags, int startId) {
     // ★ КРИТИЧНО: startForeground() должен быть ПЕРВЫМ делом в onStartCommand.
@@ -130,10 +139,9 @@ public class ConnectionManager extends Service {
       log("Action: " + action);
 
       if (ACTION_STOP.equals(action)) {
-        log("Получена команда STOP");
-        stopForeground(true);
-        foregroundStarted = false;
-        stopSelf();
+        log("Получена команда STOP — maybeStopSelf (безопасно)");
+        // ★ ИЗМЕНЕНО: maybeStopSelf вместо прямого stopSelf
+        maybeStopSelf();
         return START_NOT_STICKY;
       }
 
@@ -154,13 +162,33 @@ public class ConnectionManager extends Service {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: - stopForeground только если foregroundStarted (защита от двойного вызова — onDestroy вызывается и после maybeStopSelf); - executor.shutdown() + awaitTermination(2s) — даём активным отправкам завершиться до kill процесса.
+   */
   @Override
   public void onDestroy() {
     log("onDestroy");
     try {
-      stopForeground(true);
-      foregroundStarted = false;
-    } catch (Exception ignored) {}
+      if (foregroundStarted) {
+        stopForeground(true);
+        foregroundStarted = false;
+      }
+    } catch (Exception ignored) {
+    }
+
+    // ★ НОВОЕ: останавливаем пул, ждём до 2 с
+    try {
+      executor.shutdown();
+      if (!executor.awaitTermination(2, TimeUnit.SECONDS)) {
+        log("onDestroy: executor не завершился за 2с — shutdownNow");
+        executor.shutdownNow();
+      }
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      executor.shutdownNow();
+    } catch (Exception ignored) {
+    }
+
     super.onDestroy();
   }
 
@@ -170,44 +198,53 @@ public class ConnectionManager extends Service {
   }
 
   // ============================================================
-  //  Основная логика
+  // Основная логика
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО: executor.execute вместо new Thread. Меньше создания потоков (cached pool переиспользует), executor.shutdown() в onDestroy.
+   */
   private void handleSendSignal(Intent intent) {
     String targetIp = intent.getStringExtra(EXTRA_TARGET_IP);
     int targetPort = intent.getIntExtra(EXTRA_TARGET_PORT, 8081);
     String type = intent.getStringExtra(EXTRA_SIGNAL_TYPE);
     String body = intent.getStringExtra(EXTRA_SIGNAL_BODY);
 
-    log("Параметры: ip=" + targetIp + ", port=" + targetPort
-        + ", type=" + type
-        + ", body=" + (body != null ? body.length() + " симв." : "null"));
+    log("Параметры: ip=" + targetIp + ", port=" + targetPort + ", type=" + type + ", body="
+        + (body != null ? body.length() + " симв." : "null"));
 
-    if (targetIp == null || targetIp.isEmpty()
-        || type == null || type.isEmpty()
-        || body == null || body.isEmpty()) {
+    if (targetIp == null || targetIp.isEmpty() || type == null || type.isEmpty() || body == null
+        || body.isEmpty()) {
       logError("Не хватает параметров для отправки сигнала", null);
       maybeStopSelf();
       return;
     }
 
     // ★ Увеличиваем счётчик ДО запуска потока, чтобы onStartCommand
-    //   не успел вызвать maybeStopSelf() пока поток ещё не стартовал.
+    // не успел вызвать maybeStopSelf() пока поток ещё не стартовал.
     pendingSends.incrementAndGet();
     log("pendingSends=" + pendingSends.get() + " (после increment)");
 
-    // Отправка в фоновом потоке
+    // Отправка в фоновом потоке (cached pool)
     final String fIp = targetIp;
     final int fPort = targetPort;
     final String fType = type;
     final String fBody = body;
 
-    new Thread(() -> sendSignalHttp(fIp, fPort, fType, fBody),
-        "ConnHttpThread-" + fType).start();
+    // ★ ИЗМЕНЕНО: executor.execute вместо new Thread
+    try {
+      executor.execute(() -> sendSignalHttp(fIp, fPort, fType, fBody));
+    } catch (Exception e) {
+      logError("handleSendSignal: executor.execute", e);
+      // Откат счётчика, если execute упал
+      int remaining = pendingSends.decrementAndGet();
+      log("pendingSends=" + remaining + " (после отката)");
+      maybeStopSelf();
+    }
   }
 
   // ============================================================
-  //  HTTP-клиент
+  // HTTP-клиент
   // ============================================================
 
   private void sendSignalHttp(String ip, int port, String type, String jsonBody) {
@@ -223,8 +260,7 @@ public class ConnectionManager extends Service {
       URL url = new URL(urlStr);
       conn = (HttpURLConnection) url.openConnection();
       conn.setRequestMethod("POST");
-      conn.setRequestProperty("Content-Type",
-          "application/json; charset=utf-8");
+      conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
       conn.setRequestProperty("Accept", "application/json");
       conn.setRequestProperty("User-Agent", "Mealse/1.0");
       conn.setDoOutput(true);
@@ -252,7 +288,8 @@ public class ConnectionManager extends Service {
             new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
           StringBuilder sb = new StringBuilder();
           String line;
-          while ((line = reader.readLine()) != null) sb.append(line);
+          while ((line = reader.readLine()) != null)
+            sb.append(line);
           log("✓ Ответ (" + type + "): " + truncate(sb.toString(), 300));
         }
       } else {
@@ -260,7 +297,8 @@ public class ConnectionManager extends Service {
             new InputStreamReader(conn.getErrorStream(), StandardCharsets.UTF_8))) {
           StringBuilder sb = new StringBuilder();
           String line;
-          while ((line = reader.readLine()) != null) sb.append(line);
+          while ((line = reader.readLine()) != null)
+            sb.append(line);
           logError("✗ HTTP " + code + " (" + type + "): " + truncate(sb.toString(), 300), null);
         } catch (Exception e) {
           logError("HTTP " + code + ", не удалось прочитать errorStream", e);
@@ -269,8 +307,8 @@ public class ConnectionManager extends Service {
 
     } catch (java.net.SocketTimeoutException e) {
       long elapsed = System.currentTimeMillis() - startTime;
-      logError("TIMEOUT подключения к " + ip + ":" + port
-          + " за " + elapsed + " мс (" + type + ")", e);
+      logError("TIMEOUT подключения к " + ip + ":" + port + " за " + elapsed + " мс (" + type + ")",
+          e);
 
     } catch (java.net.ConnectException e) {
       String msg = e.getMessage() != null ? e.getMessage() : "";
@@ -280,8 +318,7 @@ public class ConnectionManager extends Service {
       logError("UnknownHost: " + ip + " (" + type + ")", e);
 
     } catch (IOException e) {
-      String msg = e.getMessage() != null ? e.getMessage()
-          : e.getClass().getSimpleName();
+      String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
       logError("IOException: " + msg + " (" + type + ")", e);
 
     } catch (Exception e) {
@@ -291,7 +328,8 @@ public class ConnectionManager extends Service {
       if (conn != null) {
         try {
           conn.disconnect();
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+        }
       }
 
       log("════ sendSignalHttp END (" + type + ") ════");
@@ -309,23 +347,26 @@ public class ConnectionManager extends Service {
   }
 
   // ============================================================
-  //  Остановка сервиса
+  // Остановка сервиса
   // ============================================================
 
   /**
-   * ★ Безопасная остановка: только если счётчик активных отправок == 0.
-   * Если > 0 — не трогаем, поток сам вызовет maybeStopSelf() в finally.
+   * ★ Безопасная остановка: только если счётчик активных отправок == 0. Если > 0 — не трогаем, поток сам вызовет maybeStopSelf() в finally.
+   */
+  /**
+   * ★ ИЗМЕНЕНО: stopForeground только если foregroundStarted — защита от двойного вызова (onDestroy + maybeStopSelf).
    */
   private void maybeStopSelf() {
     if (pendingSends.get() > 0) {
-      log("maybeStopSelf: pendingSends=" + pendingSends.get()
-          + " > 0 — откладываю остановку");
+      log("maybeStopSelf: pendingSends=" + pendingSends.get() + " > 0 — откладываю остановку");
       return;
     }
     try {
       log("maybeStopSelf: pendingSends=0 — останавливаю сервис");
-      stopForeground(true);
-      foregroundStarted = false;
+      if (foregroundStarted) {
+        stopForeground(true);
+        foregroundStarted = false;
+      }
       stopSelf();
     } catch (Exception e) {
       logError("Ошибка stopSelf", e);
@@ -333,14 +374,12 @@ public class ConnectionManager extends Service {
   }
 
   // ============================================================
-  //  Notification
+  // Notification
   // ============================================================
 
   private void createNotificationChannel() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      NotificationChannel channel = new NotificationChannel(
-          CHANNEL_ID,
-          "Mealse Сигналинг",
+      NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "Mealse Сигналинг",
           NotificationManager.IMPORTANCE_LOW);
       channel.setDescription("Отправка сигналов для звонков Mealse");
       NotificationManager nm = getSystemService(NotificationManager.class);
@@ -351,16 +390,12 @@ public class ConnectionManager extends Service {
   }
 
   private Notification buildNotification(String text) {
-    return new Notification.Builder(this, CHANNEL_ID)
-        .setContentTitle("Mealse")
-        .setContentText(text)
-        .setSmallIcon(android.R.drawable.stat_sys_upload)
-        .setOngoing(true)
-        .build();
+    return new Notification.Builder(this, CHANNEL_ID).setContentTitle("Mealse").setContentText(text)
+        .setSmallIcon(android.R.drawable.stat_sys_upload).setOngoing(true).build();
   }
 
   // ============================================================
-  //  Хелперы логирования
+  // Хелперы логирования
   // ============================================================
 
   private void log(String message) {
@@ -380,7 +415,8 @@ public class ConnectionManager extends Service {
   }
 
   private String truncate(String s, int max) {
-    if (s == null) return "null";
+    if (s == null)
+      return "null";
     return s.length() > max ? s.substring(0, max) + "..." : s;
   }
 }

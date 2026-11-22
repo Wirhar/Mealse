@@ -31,25 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * Централизованный логгер для Mealse.
  *
- * Особенности:
- *  - Singleton на тег: один FileWriter на тег, потокобезопасно.
- *  - Файлы: /storage/emulated/0/MealseLogs/<tag>.log (если доступно),
- *    иначе getExternalFilesDir()/MealseLogs/<tag>.log.
- *  - ОБЩИЙ ЛОГ: все экземпляры дополнительно пишут в mealse_all.txt
- *    (та же директория, что и теговые логи). Каждая строка помечена
- *    тегом источника. Файл закрывается только когда закрыт последний логгер.
- *  - Без ротации — файл растёт, чтобы можно было открыть в текстовом редакторе.
- *  - Дублирует вывод в android.util.Log (для Logcat).
- *  - Обрабатывает stack trace.
+ * Особенности: - Singleton на тег: один FileWriter на тег, потокобезопасно. - Файлы: /storage/emulated/0/MealseLogs/<tag>.log (если доступно), иначе getExternalFilesDir()/MealseLogs/<tag>.log. - ОБЩИЙ ЛОГ: все экземпляры дополнительно пишут в mealse_all.txt (та же директория, что и теговые логи). Каждая строка помечена тегом источника. Файл закрывается только когда закрыт последний логгер. - Без ротации — файл растёт, чтобы можно было открыть в текстовом редакторе. - Дублирует вывод в android.util.Log (для Logcat). - Обрабатывает stack trace.
  *
- *  - Вложенный LogcatCapture: постоянный захват системного logcat
- *    (буферы main+system+events) в logcat_all.txt + выгрузка нужного окна
- *    в logcat_<from>_<to>.txt. Нужен для диагностики того, КТО гасит
- *    активити (am_destroy_activity и пр.) — файловые логи этого не показывают.
- *    ВАЖНО: без разрешения READ_LOGS видны только собственные строки:
- *        adb shell pm grant com.my.mealse android.permission.READ_LOGS
+ * - Вложенный LogcatCapture: постоянный захват системного logcat (буферы main+system+events) в logcat_all.txt + выгрузка нужного окна в logcat_<from>_<to>.txt. Нужен для диагностики того, КТО гасит активити (am_destroy_activity и пр.) — файловые логи этого не показывают. ВАЖНО: без разрешения READ_LOGS видны только собственные строки: adb shell pm grant com.my.mealse android.permission.READ_LOGS
  *
- *  - Вложенный CrashHandler: пишет crash.log при необработанном исключении.
+ * - Вложенный CrashHandler: пишет crash.log при необработанном исключении.
  */
 public class MealseLogger {
 
@@ -58,6 +44,18 @@ public class MealseLogger {
   private static final String SHARED_LOG_NAME = "mealse_all.txt";
   private static final SimpleDateFormat TS_FORMAT = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS",
       Locale.getDefault());
+
+  /**
+   * ★ НОВОЕ: batched writer для общего лога (mealse_all.txt).
+   *
+   * Раньше writeShared писал synchronized на КАЖДУЮ строку — при интенсивном логе (ServerService + MessengerReceiver + CallActivity + WifiDirectManager) sharedLock становился узким местом.
+   *
+   * Теперь: строки копятся в sharedBuffer (ArrayList), flush раз в SHARED_FLUSH_INTERVAL_MS (1 с) или при достижении SHARED_BUFFER_MAX (64 строки). Меньше lock contention.
+   */
+  private static final List<String> sharedBuffer = new ArrayList<>();
+  private static final int SHARED_BUFFER_MAX = 64;
+  private static final long SHARED_FLUSH_INTERVAL_MS = 1000L;
+  private static volatile long sharedLastFlushAt = 0L;
 
   // Кэш логгеров: один экземпляр на тег
   private static final ConcurrentHashMap<String, MealseLogger> instances = new ConcurrentHashMap<>();
@@ -120,8 +118,7 @@ public class MealseLogger {
   }
 
   /**
-   * Инициализация общего файла mealse_all.txt. Выполняется один раз
-   * (первым созданным логгером), последующие экземпляры пишут в него же.
+   * Инициализация общего файла mealse_all.txt. Выполняется один раз (первым созданным логгером), последующие экземпляры пишут в него же.
    */
   private static void initSharedWriter(Context appContext) {
     synchronized (sharedLock) {
@@ -142,8 +139,7 @@ public class MealseLogger {
         }
         sharedWriter = new FileWriter(sharedLogFile, true);
         String header = "\n=== Mealse — общий лог (все классы) — "
-            + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-                .format(new Date())
+            + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(new Date())
             + " ===\n";
         sharedWriter.write(header);
         sharedWriter.flush();
@@ -158,16 +154,48 @@ public class MealseLogger {
   /**
    * Запись строки в общий лог. Тихо пропускается, если writer не открыт.
    */
+  /**
+   * ★ ИЗМЕНЕНО: batched write. Строки копятся в sharedBuffer, flush раз в 1 с или при 64 строках. Меньше lock contention при интенсивном логе.
+   */
   private static void writeShared(String line) {
     synchronized (sharedLock) {
       if (sharedWriter == null)
         return;
-      try {
-        sharedWriter.write(line);
-        sharedWriter.flush();
-      } catch (IOException e) {
-        Log.e(TAG_BASE, "Ошибка записи в общий лог " + sharedLogFile, e);
+      sharedBuffer.add(line);
+      long now = System.currentTimeMillis();
+      if (sharedBuffer.size() >= SHARED_BUFFER_MAX
+          || (now - sharedLastFlushAt) >= SHARED_FLUSH_INTERVAL_MS) {
+        flushSharedBufferLocked();
+        sharedLastFlushAt = now;
       }
+    }
+  }
+
+  /**
+   * ★ НОВОЕ: сбрасывает sharedBuffer в sharedWriter. Вызывать под sharedLock (или из writeShared/flushSharedBuffer).
+   */
+  private static void flushSharedBufferLocked() {
+    if (sharedBuffer.isEmpty() || sharedWriter == null)
+      return;
+    try {
+      for (String s : sharedBuffer) {
+        sharedWriter.write(s);
+      }
+      sharedWriter.flush();
+    } catch (IOException e) {
+      Log.e(TAG_BASE, "Ошибка flush общего лога " + sharedLogFile, e);
+    } finally {
+      sharedBuffer.clear();
+    }
+  }
+
+  /**
+   * ★ НОВОЕ: принудительный flush sharedBuffer (для close / resetAll). Безопасен для вызова из любого потока.
+   */
+  public static void flushSharedBuffer() {
+    synchronized (sharedLock) {
+      flushSharedBufferLocked();
+      sharedLastFlushAt = System.currentTimeMillis();
     }
   }
 
@@ -181,10 +209,7 @@ public class MealseLogger {
   /**
    * Определяет директорию для логов.
    *
-   * Порядок:
-   *  1. /storage/emulated/0/MealseLogs/ (публичная, если доступна)
-   *  2. getExternalFilesDir()/MealseLogs/ (app-specific)
-   *  3. null → вызывающий использует внутреннее хранилище
+   * Порядок: 1. /storage/emulated/0/MealseLogs/ (публичная, если доступна) 2. getExternalFilesDir()/MealseLogs/ (app-specific) 3. null → вызывающий использует внутреннее хранилище
    */
   public static File resolveLogDir(Context context) {
     // 1. Пытаемся создать публичную папку в корне внешнего хранилища
@@ -216,8 +241,7 @@ public class MealseLogger {
   }
 
   /**
-   * Пытается получить /storage/emulated/0/MealseLogs/.
-   * На API 29+ вернёт директорию, но запись в неё не пройдёт (canWrite=false).
+   * Пытается получить /storage/emulated/0/MealseLogs/. На API 29+ вернёт директорию, но запись в неё не пройдёт (canWrite=false).
    */
   private static File tryPublicLogDir() {
     try {
@@ -402,8 +426,7 @@ public class MealseLogger {
       File[] files = dir.listFiles();
       if (files != null) {
         for (File f : files) {
-          if (f.isFile() && (f.getName().endsWith(".log")
-              || f.getName().endsWith(".txt"))) {
+          if (f.isFile() && (f.getName().endsWith(".log") || f.getName().endsWith(".txt"))) {
             result.add(f);
           }
         }
@@ -424,8 +447,7 @@ public class MealseLogger {
   }
 
   /**
-   * Открывает папку с логами через файловый менеджер. Не требует FileProvider,
-   * но зависит от поддержки файловым менеджером.
+   * Открывает папку с логами через файловый менеджер. Не требует FileProvider, но зависит от поддержки файловым менеджером.
    */
   public static Intent buildOpenFolderIntent(Context context) {
     File dir = resolveDirOrInternal(context);
@@ -443,9 +465,7 @@ public class MealseLogger {
   }
 
   /**
-   * @deprecated Используйте {@link #buildOpenFolderIntent(Context)} или
-   * {@link #buildShareIntent(Context)}. На API 24+ без FileProvider может
-   * бросить FileUriExposedException.
+   * @deprecated Используйте {@link #buildOpenFolderIntent(Context)} или {@link #buildShareIntent(Context)}. На API 24+ без FileProvider может бросить FileUriExposedException.
    */
   @Deprecated
   public static Intent buildOpenIntent(Context context, File logFile) {
@@ -513,10 +533,15 @@ public class MealseLogger {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: сначала flushSharedBufferLocked() — иначе накопленные строки в sharedBuffer потеряются при close.
+   */
   private static void closeSharedWriter() {
     synchronized (sharedLock) {
       if (sharedWriter != null) {
         try {
+          // ★ Сначала сбрасываем накопленные строки
+          flushSharedBufferLocked();
           sharedWriter.write("=== End of shared log ===\n");
           sharedWriter.flush();
           sharedWriter.close();
@@ -525,6 +550,7 @@ public class MealseLogger {
         }
         sharedWriter = null;
       }
+      sharedBuffer.clear();
     }
   }
 
@@ -542,12 +568,18 @@ public class MealseLogger {
   /**
    * Полностью сбрасывает все логгеры и их writer'ы (включая общий лог).
    *
-   * Используется, когда изменилась директория логов (например, после выдачи
-   * MANAGE_EXTERNAL_STORAGE). Следующий вызов get() создаст новые writer'ы.
+   * Используется, когда изменилась директория логов (например, после выдачи MANAGE_EXTERNAL_STORAGE). Следующий вызов get() создаст новые writer'ы.
+   */
+  /**
+   * ★ ИЗМЕНЕНО: closeAll() уже flush'ит sharedBuffer через closeSharedWriter(). Явно чистим sharedBuffer для гигиены.
    */
   public static void resetAll() {
     closeAll();
     activeLoggers.set(0);
+    synchronized (sharedLock) {
+      sharedBuffer.clear();
+      sharedLastFlushAt = 0L;
+    }
     Log.d(TAG_BASE, "Все логгеры сброшены — директория будет пересчитана");
   }
 
@@ -570,8 +602,7 @@ public class MealseLogger {
   }
 
   /**
-   * Выгружает строки системного logcat за интервал в файл
-   * logcat_<from>_<to>.txt в директории логов MealseLogger.
+   * Выгружает строки системного logcat за интервал в файл logcat_<from>_<to>.txt в директории логов MealseLogger.
    *
    * @param startIso "2026-11-17 21:09:00"
    * @param endIso   "2026-11-17 21:15:30"
@@ -605,27 +636,15 @@ public class MealseLogger {
   /**
    * Захват системного logcat в файлы /MealseLogs/.
    *
-   * Зачем: файловые логи приложения не показывают, кто гасит активити.
-   * Это делает ActivityManager — его события (am_destroy_activity, am_kill,
-   * am_proc_died, am_low_memory) живут в системном буфере events.
+   * Зачем: файловые логи приложения не показывают, кто гасит активити. Это делает ActivityManager — его события (am_destroy_activity, am_kill, am_proc_died, am_low_memory) живут в системном буфере events.
    *
-   * Режимы:
-   *  1. start(context) — фоновый поток постоянно читает буферы main+system+events
-   *     и пишет в logcat_all.txt. Ротация: при >5 МБ файл переезжает
-   *     в logcat_all.1/.2/.3 (старший удаляется). Вызывать один раз
-   *     в MealseApp.onCreate. Выгрузка окна — extractWindow/extractRange.
+   * Режимы: 1. start(context) — фоновый поток постоянно читает буферы main+system+events и пишет в logcat_all.txt. Ротация: при >5 МБ файл переезжает в logcat_all.1/.2/.3 (старший удаляется). Вызывать один раз в MealseApp.onCreate. Выгрузка окна — extractWindow/extractRange.
    *
-   *  2. extractWindow(context, startIso, endIso) — выгружает из текущих буферов
-   *     строки за указанный интервал в logcat_<from>_<to>.txt
-   *     (та же директория, что и остальные логи MealseLogger).
+   * 2. extractWindow(context, startIso, endIso) — выгружает из текущих буферов строки за указанный интервал в logcat_<from>_<to>.txt (та же директория, что и остальные логи MealseLogger).
    *
-   * ВАЖНО: без разрешения READ_LOGS приложение видит через logcat только
-   * СВОИ строки (main), буферы events/system будут пустыми. Выдать разово:
-   *     adb shell pm grant com.my.mealse android.permission.READ_LOGS
+   * ВАЖНО: без разрешения READ_LOGS приложение видит через logcat только СВОИ строки (main), буферы events/system будут пустыми. Выдать разово: adb shell pm grant com.my.mealse android.permission.READ_LOGS
    *
-   * Формат строк с -v time: "11-17 21:09:30.123 Tag: message".
-   * Строки без метки времени (продолжение stack trace) наследуются
-   * от предыдущей строки: если она в окне — они тоже попадают в файл.
+   * Формат строк с -v time: "11-17 21:09:30.123 Tag: message". Строки без метки времени (продолжение stack trace) наследуются от предыдущей строки: если она в окне — они тоже попадают в файл.
    */
   public static final class LogcatCapture {
 
@@ -634,12 +653,11 @@ public class MealseLogger {
     private static final long MAX_FILE_BYTES = 5L * 1024 * 1024;
     private static final int KEEP_OLD = 3;
 
-    private static final SimpleDateFormat TS_PARSE =
-        new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US);
-    private static final SimpleDateFormat TS_FILE =
-        new SimpleDateFormat("HHmmss", Locale.US);
-    private static final SimpleDateFormat TS_WINDOW =
-        new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
+    private static final SimpleDateFormat TS_PARSE = new SimpleDateFormat("MM-dd HH:mm:ss.SSS",
+        Locale.US);
+    private static final SimpleDateFormat TS_FILE = new SimpleDateFormat("HHmmss", Locale.US);
+    private static final SimpleDateFormat TS_WINDOW = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+        Locale.getDefault());
 
     private static final Object lock = new Object();
     private static volatile boolean running = false;
@@ -695,14 +713,13 @@ public class MealseLogger {
         Writer w = null;
         BufferedReader r = null;
         try {
-          ProcessBuilder pb = new ProcessBuilder(
-              "logcat", "-v", "time",
-              "-b", "main", "-b", "system", "-b", "events");
+          ProcessBuilder pb = new ProcessBuilder("logcat", "-v", "time", "-b", "main", "-b",
+              "system", "-b", "events");
           pb.redirectErrorStream(false);
           p = pb.start();
           logcatProcess = p;
-          r = new BufferedReader(
-              new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8), 64 * 1024);
+          r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8),
+              64 * 1024);
           w = openWriter();
           String line;
           while (running && (line = r.readLine()) != null) {
@@ -754,8 +771,9 @@ public class MealseLogger {
     }
 
     private static Writer openWriter() throws Exception {
-      return new BufferedWriter(new OutputStreamWriter(
-          new FileOutputStream(liveFile, true), StandardCharsets.UTF_8), 64 * 1024);
+      return new BufferedWriter(
+          new OutputStreamWriter(new FileOutputStream(liveFile, true), StandardCharsets.UTF_8),
+          64 * 1024);
     }
 
     private static void rotate() throws Exception {
@@ -809,14 +827,12 @@ public class MealseLogger {
     }
 
     /**
-     * Выгрузка по millis. Буферы глубиной ~несколько часов: если окно старше —
-     * строки уже затёрты, вызывайте сразу после теста.
+     * Выгрузка по millis. Буферы глубиной ~несколько часов: если окно старше — строки уже затёрты, вызывайте сразу после теста.
      */
     public static File extractRange(Context context, long startMillis, long endMillis) {
       File dir = resolveDirOrInternal(context);
 
-      String fname = "logcat_"
-          + TS_FILE.format(new Date(startMillis)) + "_"
+      String fname = "logcat_" + TS_FILE.format(new Date(startMillis)) + "_"
           + TS_FILE.format(new Date(endMillis)) + ".txt";
       File out = new File(dir, fname);
 
@@ -825,17 +841,15 @@ public class MealseLogger {
       Process p = null;
       BufferedReader r = null;
       try {
-        w = new BufferedWriter(new OutputStreamWriter(
-            new FileOutputStream(out), StandardCharsets.UTF_8));
-        w.write("# logcat с " + TS_PARSE.format(new Date(startMillis))
-            + " по " + TS_PARSE.format(new Date(endMillis))
-            + " (буферы main+system+events)\n");
+        w = new BufferedWriter(
+            new OutputStreamWriter(new FileOutputStream(out), StandardCharsets.UTF_8));
+        w.write("# logcat с " + TS_PARSE.format(new Date(startMillis)) + " по "
+            + TS_PARSE.format(new Date(endMillis)) + " (буферы main+system+events)\n");
 
-        p = Runtime.getRuntime().exec(new String[]{
-            "logcat", "-d", "-v", "time",
-            "-b", "main", "-b", "system", "-b", "events"});
-        r = new BufferedReader(
-            new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8), 64 * 1024);
+        p = Runtime.getRuntime().exec(new String[] { "logcat", "-d", "-v", "time", "-b", "main",
+            "-b", "system", "-b", "events" });
+        r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8),
+            64 * 1024);
 
         String line;
         boolean lastKept = false;
@@ -884,6 +898,9 @@ public class MealseLogger {
     }
 
     /** Разбирает "MM-dd HH:mm:ss.SSS" из начала строки (год подгоняется к текущему, с защитой от Нового года). */
+    /**
+     * ★ ИЗМЕНЕНО: 365.25 вместо 365 — средняя длина года (високосный). Раньше 365 дней — ±1 день в окне logcat.
+     */
     private static long parseLogcatTime(String line) {
       if (line == null || line.length() < 18)
         return -1;
@@ -895,7 +912,8 @@ public class MealseLogger {
         if (d == null)
           return -1;
         long now = System.currentTimeMillis();
-        long year = 365L * 24 * 60 * 60 * 1000;
+        // ★ 365.25 дней (средняя длина года)
+        long year = (long) (365.25 * 24 * 60 * 60 * 1000);
         long ts = d.getTime();
         if (ts > now + year / 2) {
           ts -= year;
@@ -905,6 +923,7 @@ public class MealseLogger {
         return -1;
       }
     }
+
   }
 
   // ============================================================
@@ -912,17 +931,13 @@ public class MealseLogger {
   // ============================================================
 
   /**
-   * Обработчик необработанных исключений: пишет crash.log в директорию
-   * логов MealseLogger и передаёт управление предыдущему обработчику.
+   * Обработчик необработанных исключений: пишет crash.log в директорию логов MealseLogger и передаёт управление предыдущему обработчику.
    *
    * crash.log содержит: время, поток, устройство, SDK, полный stack trace.
    *
-   * Установка (MealseApp.onCreate, ПОСЛЕ разрешения storage,
-   * до WifiDirectManager):
-   *     MealseLogger.installCrashHandler(this);
+   * Установка (MealseApp.onCreate, ПОСЛЕ разрешения storage, до WifiDirectManager): MealseLogger.installCrashHandler(this);
    *
-   * Если в приложении уже есть свой crash handler — он заменяется,
-   * сохраняя цепочку (previous handler вызывается после записи файла).
+   * Если в приложении уже есть свой crash handler — он заменяется, сохраняя цепочку (previous handler вызывается после записи файла).
    */
   public static final class CrashHandler implements Thread.UncaughtExceptionHandler {
 
@@ -970,8 +985,8 @@ public class MealseLogger {
           sb.append("\n╔════════════════════════════════════════════╗\n");
           sb.append("CRASH — ").append(ts).append('\n');
           sb.append("Поток: ").append(thread.getName()).append('\n');
-          sb.append("Устройство: ").append(Build.MANUFACTURER).append(' ')
-              .append(Build.MODEL).append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
+          sb.append("Устройство: ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+              .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
           sb.append("Исключение: ").append(throwable.getClass().getName()).append('\n');
           sb.append("Сообщение: ").append(throwable.getMessage()).append('\n');
           sb.append("Стек:\n").append(sw.toString());

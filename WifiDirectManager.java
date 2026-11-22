@@ -32,6 +32,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * WifiDirectManager — ядро Wi-Fi Direct в Mealse.
@@ -56,6 +57,11 @@ public class WifiDirectManager {
   /** ★ НОВОЕ: heartbeat для удержания WD-канала живым. */
   private java.util.concurrent.ScheduledExecutorService heartbeatExecutor;
   private static final long HEARTBEAT_INTERVAL_MS = 10_000L;
+
+  /** ★ НОВОЕ: max попыток переподключения сокет-канала (поверх живой WD-группы). */
+  private static final int MAX_SOCKET_RECONNECT_ATTEMPTS = 5;
+  /** ★ НОВОЕ: задержки между попытками reconnect сокета. */
+  private static final long[] SOCKET_RECONNECT_DELAYS_MS = { 1000L, 2000L, 4000L, 8000L, 15000L };
 
   private static final int MAX_CHANNEL_REOPEN_ATTEMPTS = 3;
   private static final long[] CHANNEL_REOPEN_DELAYS_MS = { 2000L, 5000L, 10000L };
@@ -131,6 +137,8 @@ public class WifiDirectManager {
   private String selfDeviceId;
   private String selfFingerprint;
   private String selfName;
+  /** ★ НОВОЕ: счётчик попыток reconnect сокет-канала. */
+  private final AtomicInteger socketReconnectAttempts = new AtomicInteger(0);
 
   // ============================================================
   // Вложенные классы
@@ -252,13 +260,27 @@ public class WifiDirectManager {
   // Lifecycle
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО: open() теперь обёртка над openInternal(boolean).
+   *
+   * removeExistingGroup=true — для явного open() (пользователь/старт приложения). removeExistingGroup=false — для автоматического reopen после onChannelDisconnected (не убиваем живую группу, которую пытаемся восстановить).
+   */
   public boolean open() {
+    return openInternal(true);
+  }
+
+  /**
+   * ★ НОВОЕ: внутренний open с флагом removeExistingGroup.
+   *
+   * @param removeExistingGroup true — вызвать removeGroup (явный open), false — не трогать существующую группу (auto-reopen).
+   */
+  private boolean openInternal(boolean removeExistingGroup) {
     if (opened) {
       log.log("open: уже открыт");
       return true;
     }
 
-    log.log("══ open START ══");
+    log.log("══ open START (removeGroup=" + removeExistingGroup + ") ══");
 
     if (!isWifiDirectSupported()) {
       lastError = "Wi-Fi Direct не поддерживается этим устройством";
@@ -277,16 +299,9 @@ public class WifiDirectManager {
       }
 
       channel = wifiP2pManager.initialize(appContext, Looper.getMainLooper(), () -> {
-        // ★ onChannelDisconnected: Android может уничтожить channel
-        // при длительном P2P-простое, смене Wi-Fi сети, агрессивном
-        // энергосбережении. Единственный способ восстановления —
-        // явно переинициализировать manager и открыть заново.
         log.warn("WifiP2pManager: onChannelDisconnected — канал потерян");
         lastError = "Канал WifiP2p отключён системой";
 
-        // Помечаем состояние как «соединение разорвано»,
-        // чтобы isConnected() возвращал false и клиенты пошли
-        // через HTTP-fallback.
         boolean wasConnected = connected;
         connected = false;
         handshakeDone = false;
@@ -303,7 +318,6 @@ public class WifiDirectManager {
         }
         notifyError(lastError);
 
-        // ★ Автоматический re-open с backoff (3 попытки).
         scheduleChannelReopen();
       });
 
@@ -317,20 +331,24 @@ public class WifiDirectManager {
       registerReceiver();
       opened = true;
 
-      try {
-        wifiP2pManager.removeGroup(channel, new WifiP2pManager.ActionListener() {
-          @Override
-          public void onSuccess() {
-            log.log("open: removeGroup OK");
-          }
+      if (removeExistingGroup) {
+        try {
+          wifiP2pManager.removeGroup(channel, new WifiP2pManager.ActionListener() {
+            @Override
+            public void onSuccess() {
+              log.log("open: removeGroup OK");
+            }
 
-          @Override
-          public void onFailure(int reason) {
-            log.log("open: removeGroup fail reason=" + reason);
-          }
-        });
-      } catch (Exception e) {
-        log.logError("open: removeGroup", e);
+            @Override
+            public void onFailure(int reason) {
+              log.log("open: removeGroup fail reason=" + reason);
+            }
+          });
+        } catch (Exception e) {
+          log.logError("open: removeGroup", e);
+        }
+      } else {
+        log.log("open: removeGroup пропущен (auto-reopen, сохраняем группу)");
       }
 
       log.log("open OK");
@@ -349,6 +367,9 @@ public class WifiDirectManager {
    *
    * Пытаемся открыть заново 3 раза с задержками 2с → 5с → 10с. Если все 3 неудачи — сообщаем error, дальше только ручной open().
    */
+  /**
+   * ★ ИЗМЕНЕНО: после успешного reopen не удаляем группу и просим connection info, чтобы поверх живой группы переподнять сокеты.
+   */
   private void scheduleChannelReopen() {
     if (channelReopenAttempts.get() >= MAX_CHANNEL_REOPEN_ATTEMPTS) {
       log.warn("scheduleChannelReopen: исчерпаны попытки (" + channelReopenAttempts.get()
@@ -364,12 +385,14 @@ public class WifiDirectManager {
 
     mainHandler.postDelayed(() -> {
       log.log("scheduleChannelReopen: выполняю попытку " + attempt);
-      // Сбрасываем флаг opened, чтобы open() не ругнулся «уже открыт»
       opened = false;
-      boolean ok = open();
+      boolean ok = openInternal(false); // ★ не убиваем группу
       if (ok) {
         log.log("scheduleChannelReopen: попытка " + attempt + " успешна");
-        channelReopenAttempts.set(0); // сбрасываем счётчик
+        channelReopenAttempts.set(0);
+        socketReconnectAttempts.set(0);
+        // ★ Группа могла уцелеть — переподнимаем сокеты поверх неё
+        requestConnectionInfo();
       } else {
         log.warn("scheduleChannelReopen: попытка " + attempt + " неудачна");
         scheduleChannelReopen();
@@ -725,6 +748,9 @@ public class WifiDirectManager {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: если канал уже жив (connected && handshakeDone && socketOut), повторный CONNECTION_CHANGED не трогаем — иначе можно пересоздать только что установленное соединение.
+   */
   private void onConnectionInfoAvailable(WifiP2pInfo info) {
     if (info == null)
       return;
@@ -734,6 +760,7 @@ public class WifiDirectManager {
       connected = false;
       groupOwner = false;
       groupOwnerAddress = null;
+      socketReconnectAttempts.set(0);
       closeSockets();
       if (wasConnected)
         notifyDisconnected();
@@ -743,6 +770,12 @@ public class WifiDirectManager {
     groupOwner = info.isGroupOwner;
     groupOwnerAddress = info.groupOwnerAddress != null ? info.groupOwnerAddress.getHostAddress()
         : null;
+
+    // ★ Канал уже жив — повторный CONNECTION_CHANGED не трогаем
+    if (connected && handshakeDone && socketOut != null) {
+      log.log("onConnectionInfoAvailable: канал уже жив — пропуск");
+      return;
+    }
 
     if (groupOwner) {
       startSignalingServer();
@@ -760,10 +793,13 @@ public class WifiDirectManager {
   // Сокет-канал
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО: цикл accept вместо одного accept + фикс NPE буферов (ставим на incoming, а не на null-поле socket).
+   *
+   * После обрыва соединения клиент может переподключиться — accept-loop примет его, не пересоздавая группу.
+   */
   private void startSignalingServer() {
     if (acceptThread != null && acceptThread.isAlive())
-      return;
-    if (serverSocket != null && !serverSocket.isClosed())
       return;
 
     acceptThread = new Thread(() -> {
@@ -771,31 +807,54 @@ public class WifiDirectManager {
         serverSocket = new ServerSocket();
         serverSocket.setReuseAddress(true);
         serverSocket.setSoTimeout(SERVER_ACCEPT_TIMEOUT_MS);
-        // ★ НОВОЕ (правка C.4): увеличиваем TCP-буфер отправки.
-        // По умолчанию на Android ~64 КБ, что мало для чанков
-        // 683 КБ — sendThread блокируется на out.write, очередь
-        // растёт. 512 КБ хватает на 1 чанк с запасом.
-        try {
-          socket.setSendBufferSize(512 * 1024);
-          socket.setReceiveBufferSize(512 * 1024);
-        } catch (Exception e) {
-          log.warn("setSendBufferSize: " + e.getMessage());
-        }
         serverSocket.bind(new InetSocketAddress(SIGNALING_PORT));
+        log.log("startSignalingServer: слушаю порт " + SIGNALING_PORT);
 
-        Socket incoming = serverSocket.accept();
-        incoming.setSoTimeout(SOCKET_READ_TIMEOUT_MS);
+        // ★ Цикл: после обрыва принимаем повторное подключение клиента
+        while (opened && !Thread.currentThread().isInterrupted()) {
+          Socket incoming;
+          try {
+            incoming = serverSocket.accept();
+          } catch (java.net.SocketTimeoutException ste) {
+            continue; // таймаут accept — просто повторяем
+          }
+          if (connected && handshakeDone) {
+            // Уже есть живое соединение — лишнее закрываем
+            try {
+              incoming.close();
+            } catch (IOException ignored) {
+            }
+            continue;
+          }
+          incoming.setSoTimeout(SOCKET_READ_TIMEOUT_MS);
+          incoming.setTcpNoDelay(true);
+          // ★ ФИКС: буферы на incoming, а не на null-поле socket
+          try {
+            incoming.setSendBufferSize(512 * 1024);
+            incoming.setReceiveBufferSize(512 * 1024);
+          } catch (Exception e) {
+            log.warn("setBuffers: " + e.getMessage());
+          }
 
-        synchronized (WifiDirectManager.this) {
-          socket = incoming;
-          socketIn = new DataInputStream(socket.getInputStream());
-          socketOut = new DataOutputStream(socket.getOutputStream());
-          connected = true;
+          synchronized (WifiDirectManager.this) {
+            socket = incoming;
+            socketIn = new DataInputStream(incoming.getInputStream());
+            socketOut = new DataOutputStream(incoming.getOutputStream());
+            connected = true;
+          }
+          sendHello();
+          startReceiveLoop();
+
+          // Ждём, пока это соединение живо, затем снова accept
+          while (connected && opened && !Thread.currentThread().isInterrupted()) {
+            try {
+              Thread.sleep(500);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+              break;
+            }
+          }
         }
-
-        sendHello();
-        startReceiveLoop();
-
       } catch (IOException e) {
         if (opened && !Thread.currentThread().isInterrupted()) {
           log.logError("startSignalingServer: IOException", e);
@@ -811,13 +870,17 @@ public class WifiDirectManager {
         } catch (IOException ignored) {
         }
         serverSocket = null;
+        log.log("startSignalingServer: accept-loop завершён");
       }
     }, "WifiDirectAcceptThread");
     acceptThread.start();
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: буферы на локальном s (а не на null-поле socket), при ошибке — scheduleSocketReconnect() с backoff.
+   */
   private void connectToSignalingServer() {
-    if (socket != null && socket.isConnected() && !socket.isClosed())
+    if (socket != null && socket.isConnected() && !socket.isClosed() && connected)
       return;
 
     new Thread(() -> {
@@ -826,15 +889,12 @@ public class WifiDirectManager {
         s.setTcpNoDelay(true);
         s.connect(new InetSocketAddress(groupOwnerAddress, SIGNALING_PORT), HANDSHAKE_TIMEOUT_MS);
         s.setSoTimeout(SOCKET_READ_TIMEOUT_MS);
-        // ★ НОВОЕ (правка C.4): увеличиваем TCP-буфер отправки.
-        // По умолчанию на Android ~64 КБ, что мало для чанков
-        // 683 КБ — sendThread блокируется на out.write, очередь
-        // растёт. 512 КБ хватает на 1 чанк с запасом.
+        // ★ ФИКС: буферы на s, до synchronized
         try {
-          socket.setSendBufferSize(512 * 1024);
-          socket.setReceiveBufferSize(512 * 1024);
+          s.setSendBufferSize(512 * 1024);
+          s.setReceiveBufferSize(512 * 1024);
         } catch (Exception e) {
-          log.warn("setSendBufferSize: " + e.getMessage());
+          log.warn("setBuffers: " + e.getMessage());
         }
 
         synchronized (WifiDirectManager.this) {
@@ -843,14 +903,14 @@ public class WifiDirectManager {
           socketOut = new DataOutputStream(s.getOutputStream());
           connected = true;
         }
-
         sendHello();
         startReceiveLoop();
-
       } catch (IOException e) {
         log.logError("connectToSignalingServer: IOException", e);
         lastError = "Подключение к GO: " + e.getMessage();
         notifyError(lastError);
+        // ★ НОВОЕ: автоматический reconnect с backoff
+        scheduleSocketReconnect();
       }
     }, "WifiDirectConnectThread").start();
   }
@@ -862,6 +922,9 @@ public class WifiDirectManager {
 
   /**
    * ★ ИЗМЕНЕНО: читаем новый формат [uint32 len][uint8 type][payload], с fallback на старый формат [uint32 len][JSON UTF-8] — если первый байт payload не 0x01..0x06.
+   */
+  /**
+   * ★ ИЗМЕНЕНО: в finally — scheduleSocketReconnect() (переподнять сокет поверх живой группы).
    */
   private void receiveLoop() {
     log.log("receiveLoop START");
@@ -902,7 +965,6 @@ public class WifiDirectManager {
     } catch (Exception e) {
       log.logError("receiveLoop: ошибка", e);
     } finally {
-      // ★ ИЗМЕНЕНО: явно закрываем сокеты и уведомляем об обрыве
       boolean wasConnected;
       synchronized (this) {
         wasConnected = connected;
@@ -912,11 +974,44 @@ public class WifiDirectManager {
       } catch (Exception ignored) {
       }
       if (wasConnected) {
-        log.warn("receiveLoop: соединение потеряно → notifyDisconnected");
+        log.warn("receiveLoop: соединение потеряно → notifyDisconnected + reconnect");
         notifyDisconnected();
       }
+      // ★ НОВОЕ: автоматический reconnect сокета
+      scheduleSocketReconnect();
       log.log("receiveLoop END");
     }
+  }
+
+  /**
+   * ★ НОВОЕ: переподключение сокет-канала поверх существующей WD-группы.
+   *
+   * Вызывается из receiveLoop.finally и connectToSignalingServer при ошибке. До 5 попыток с задержками 1с → 2с → 4с → 8с → 15с.
+   *
+   * В отличие от scheduleChannelReopen (переоткрывает WifiP2pManager), этот метод НЕ трогает group — только переподнимает TCP-сокет.
+   */
+  private void scheduleSocketReconnect() {
+    if (!opened || connected)
+      return;
+    int attempt = socketReconnectAttempts.incrementAndGet();
+    if (attempt > MAX_SOCKET_RECONNECT_ATTEMPTS) {
+      log.warn("scheduleSocketReconnect: исчерпаны попытки");
+      return;
+    }
+    long delay = SOCKET_RECONNECT_DELAYS_MS[Math.min(attempt - 1,
+        SOCKET_RECONNECT_DELAYS_MS.length - 1)];
+    log.log("scheduleSocketReconnect: попытка " + attempt + " через " + delay + "мс");
+    mainHandler.postDelayed(() -> {
+      if (!opened || connected)
+        return;
+      if (groupOwner) {
+        startSignalingServer(); // accept-loop примет клиента
+      } else if (groupOwnerAddress != null) {
+        connectToSignalingServer();
+      } else {
+        requestConnectionInfo(); // узнать GO заново
+      }
+    }, delay);
   }
 
   /**
@@ -1194,6 +1289,11 @@ public class WifiDirectManager {
    *
    * Теперь: 2 подряд IOException — тогда реальный обрыв. Один — повтор.
    */
+  /**
+   * ★ ИЗМЕНЕНО: sendThread пишет под sendLock (единый писатель).
+   *
+   * ★ ИСПРАВЛЕНО описание: heartbeat УЖЕ писал под synchronized (sendLock), а sendThread — БЕЗ него. Интерливинг кадров вызывал именно sendThread. Теперь heartbeat идёт через очередь (startHeartbeat → sendRawJson), sendThread — единственный, кто пишет в socketOut, и делает это под lock.
+   */
   private void startSendThreadIfNeeded() {
     if (sendThread != null && sendThread.isAlive())
       return;
@@ -1205,14 +1305,17 @@ public class WifiDirectManager {
           byte[] frame = sendQueue.poll(500, java.util.concurrent.TimeUnit.MILLISECONDS);
           if (frame == null)
             continue;
-          DataOutputStream out = this.socketOut;
-          if (out == null) {
-            log.warn("sendThread: socketOut == null — выходим");
-            break;
+          // ★ Единый lock: запись под sendLock, как и heartbeat (через очередь)
+          synchronized (sendLock) {
+            DataOutputStream out = this.socketOut;
+            if (out == null) {
+              log.warn("sendThread: socketOut == null — выходим");
+              break;
+            }
+            out.write(frame);
+            out.flush();
           }
-          out.write(frame);
-          out.flush();
-          consecutiveIoErrors = 0; // успех — сбрасываем счётчик
+          consecutiveIoErrors = 0;
         } catch (InterruptedException ie) {
           Thread.currentThread().interrupt();
           break;
@@ -1249,6 +1352,7 @@ public class WifiDirectManager {
         } catch (Exception ignored) {
         }
         notifyDisconnected();
+        scheduleSocketReconnect(); // ★ НОВОЕ
       }
     }, "WifiDirectSendThread");
     sendThread.start();
@@ -1297,12 +1401,13 @@ public class WifiDirectManager {
   // Закрытие сокетов
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО: останавливает sendThread и чистит очередь. Иначе после closeSockets sendThread мог продолжать писать в мёртвый socketOut (IOException), а кадры в sendQueue копились до OOM.
+   */
   private synchronized void closeSockets() {
     connected = false;
     handshakeDone = false;
 
-    // ★ Останавливаем heartbeat ДО закрытия сокетов, чтобы
-    // heartbeat-thread не пытался писать в закрывающийся сокет.
     stopHeartbeat();
 
     if (acceptThread != null) {
@@ -1313,6 +1418,11 @@ public class WifiDirectManager {
       receiveThread.interrupt();
       receiveThread = null;
     }
+    if (sendThread != null) { // ★ НОВОЕ
+      sendThread.interrupt();
+      sendThread = null;
+    }
+    sendQueue.clear(); // ★ НОВОЕ
 
     try {
       if (socketIn != null) {
@@ -1504,6 +1614,11 @@ public class WifiDirectManager {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО: heartbeat идёт через общую очередь sendQueue, а не прямой записью в socketOut. Единственный писатель в сокет — sendThread (под sendLock). Это устраняет интерливинг кадров.
+   *
+   * ★ ИСПРАВЛЕНО описание (было перепутано): в старом коде heartbeat уже писал под synchronized (sendLock), а sendThread — без него. Интерливинг вызывал именно sendThread.
+   */
   private void startHeartbeat() {
     if (heartbeatExecutor != null) {
       log.log("startHeartbeat: уже запущен");
@@ -1516,21 +1631,14 @@ public class WifiDirectManager {
       return t;
     });
     heartbeatExecutor.scheduleWithFixedDelay(() -> {
-      if (!connected || socketOut == null) {
-        // Не пишем в лог каждый раз — это шум. Логируем только переход.
+      if (!connected || socketOut == null)
         return;
-      }
       try {
         JsonObject hb = new JsonObject();
         hb.addProperty("type", "hello_ack");
         hb.addProperty("heartbeat", true);
-        byte[] frame = WifiDirectFrame.packJson(WifiDirectFrame.TYPE_JSON_SIGNAL, hb.toString());
-        synchronized (sendLock) {
-          if (socketOut != null) {
-            socketOut.write(frame);
-            socketOut.flush();
-          }
-        }
+        // ★ Через очередь: единственный писатель — sendThread
+        sendRawJson(hb.toString());
       } catch (Exception e) {
         log.warn("heartbeat: " + e.getMessage());
       }

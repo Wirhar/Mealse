@@ -33,6 +33,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 /**
  * Планировщик офлайн-доставки.
  *
@@ -76,8 +79,17 @@ public class DeliveryScheduler {
   private final MessageRepository messageRepo;
   private final MessageTransport transport;
 
-  private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
-    Thread t = new Thread(r, "MessengerDelivery");
+  /**
+   * ★ ИЗМЕНЕНО: newCachedThreadPool вместо newSingleThreadExecutor.
+   *
+   * Причина: MessageTransport.sendFileWifiDirect для файла 20 МБ / 256 КБ = 80 чанков × 150 мс = 12 с блокировки. При single-thread все остальные сообщения (TEXT/ack/FILE для других получателей) ждут 12 с.
+   *
+   * inFlight (ConcurrentHashMap) уже защищает от параллельной отправки одной и той же outbox-записи — cached pool безопасен.
+   *
+   * Именованные потоки — для отладки (в трейсах видно "MessengerDelivery-N").
+   */
+  private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
+    Thread t = new Thread(r, "MessengerDelivery-" + System.nanoTime());
     t.setDaemon(true);
     return t;
   });
@@ -155,6 +167,9 @@ public class DeliveryScheduler {
     tickHandler.postDelayed(this::tick, TICK_INTERVAL_MS);
   }
 
+  /**
+   * ★ ВАЖНО (cached pool): ticking.compareAndSet(false, true) обязателен — без него несколько tick'ов могли бы одновременно запустить getDueLimited и создать дубли inFlight. С single-thread это было избыточно, с cached pool — критично.
+   */
   private void tick() {
     if (!started)
       return;
@@ -379,6 +394,13 @@ public class DeliveryScheduler {
   }
 
   /** ★ НОВОЕ: ищет HTTP-nodeKey участника диалога (кроме self). */
+  /**
+   * ★ ИЗМЕНЕНО: безопасная проверка fingerprint.
+   *
+   * Было: if (targetFp != null && !targetFp.equals(p.getFingerprint())) continue; - если targetFp == null — берётся ЛЮБОЙ первый участник (даже не тот, кому адресовано сообщение); - p.getFingerprint() == null — targetFp.equals(null) == false, но условие !false == true → continue — ок, но неявно.
+   *
+   * Стало: - targetFp != null → строгое совпадение (Objects.equals); - targetFp == null → берём первого не-self участника с HTTP-узлом (разумный fallback, если outbox не сохранил targetFingerprint).
+   */
   @Nullable
   private String findHttpNodeKeyForConversation(String conversationId, @Nullable String targetFp) {
     try {
@@ -388,25 +410,39 @@ public class DeliveryScheduler {
         return null;
       ParticipantRepository partRepo = new ParticipantRepository(appContext);
       List<Participant> participants = partRepo.getByConversation(conversationId);
+      if (participants == null || participants.isEmpty())
+        return null;
       String selfFp = getSelfFingerprint();
+      NodeManager nm = new NodeManager(appContext);
+
       for (Participant p : participants) {
-        if (p.getFingerprint() != null && p.getFingerprint().equals(selfFp))
+        // Пропускаем self
+        if (p.getFingerprint() != null && !p.getFingerprint().isEmpty()
+            && p.getFingerprint().equals(selfFp)) {
           continue;
-        if (targetFp != null && !targetFp.equals(p.getFingerprint()))
+        }
+        if (p.getDeviceId() != null && !p.getDeviceId().isEmpty()
+            && p.getDeviceId().equals(getSelfDeviceId())) {
           continue;
+        }
+        // Если targetFp задан — только точное совпадение
+        if (targetFp != null && !java.util.Objects.equals(targetFp, p.getFingerprint())) {
+          continue;
+        }
         // Ищем HTTP-узел по fingerprint или deviceId
-        NodeManager nm = new NodeManager(appContext);
         TrustedNode node = null;
-        if (p.getFingerprint() != null) {
+        if (p.getFingerprint() != null && !p.getFingerprint().isEmpty()) {
           node = nm.findByFingerprint(p.getFingerprint());
         }
-        if (node == null && p.getDeviceId() != null) {
+        if (node == null && p.getDeviceId() != null && !p.getDeviceId().isEmpty()) {
           List<TrustedNode> byDevice = nm.findAllByDeviceId(p.getDeviceId());
-          for (TrustedNode n : byDevice) {
-            if (n.getMode() != TrustedNode.Mode.WIFI_DIRECT && n.getIpAddress() != null
-                && !n.getIpAddress().isEmpty()) {
-              node = n;
-              break;
+          if (byDevice != null) {
+            for (TrustedNode n : byDevice) {
+              if (n.getMode() != TrustedNode.Mode.WIFI_DIRECT && n.getIpAddress() != null
+                  && !n.getIpAddress().isEmpty()) {
+                node = n;
+                break;
+              }
             }
           }
         }
@@ -480,5 +516,44 @@ public class DeliveryScheduler {
     if (id == null)
       return "?";
     return id.length() > 8 ? id.substring(0, 8) : id;
+  }
+
+  /**
+   * ★ НОВОЕ: retry всех pending-сообщений для устройства по deviceId.
+   *
+   * В отличие от retryFor(nodeKey) — ищет по deviceId ВСЕ TrustedNode (HTTP и WD), и для каждого nodeKey дергает retryFor. Это закрывает сценарий: pending висят в HTTP-outbox, WD подключился позже — сообщения переотправляются через WD (MessageTransport.shouldUseWifiDirect сам выберет WD, если WD подключён к тому же deviceId).
+   *
+   * Вызывать из WifiDirectManager.notifyConnected / MealseApp listener.onConnected.
+   */
+  public void retryForDeviceId(@Nullable String deviceId) {
+    if (deviceId == null || deviceId.isEmpty())
+      return;
+    executor.execute(() -> {
+      try {
+        NodeManager nm = new NodeManager(appContext);
+        List<TrustedNode> nodes = nm.findAllByDeviceId(deviceId);
+        if (nodes == null || nodes.isEmpty()) {
+          log.log("retryForDeviceId: " + deviceId + " — узлов не найдено");
+          return;
+        }
+        int total = 0;
+        for (TrustedNode n : nodes) {
+          String nodeKey = n.getKey();
+          if (nodeKey == null || nodeKey.isEmpty())
+            continue;
+          List<OutboxEntity> list = outboxRepo.getByTarget(nodeKey);
+          if (list == null || list.isEmpty())
+            continue;
+          log.log("retryForDeviceId: " + deviceId + " → " + nodeKey + ", записей=" + list.size());
+          for (OutboxEntity e : list) {
+            tryDeliver(e.id);
+            total++;
+          }
+        }
+        log.log("retryForDeviceId: " + deviceId + " — всего записей=" + total);
+      } catch (Exception e) {
+        log.logError("retryForDeviceId", e);
+      }
+    });
   }
 }

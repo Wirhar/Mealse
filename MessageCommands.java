@@ -32,6 +32,9 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import java.util.HashSet;
+import java.util.Set;
+
 /**
  * Фасад для UI: отправка сообщений и пометка прочитанными.
  *
@@ -168,6 +171,15 @@ public final class MessageCommands {
    * @param attachment     вложение (имя, MIME, размер, localPath)
    * @return messageId или null при ошибке
    */
+  /**
+   * ★ ИЗМЕНЕНО: - проверка convRepo.getById(conversationId) ДО saveFromFile — иначе файл-сирота в attachments/<convId>/, если диалог не существует; - при ошибке msgRepo.add после saveFromFile — очистка файла.
+   *
+   * @param context        контекст (берётся appContext)
+   * @param conversationId UUID диалога
+   * @param attachment     вложение (имя, MIME, размер, localPath)
+   * @param callId         опциональный callId (для чата звонка)
+   * @return messageId или null при ошибке
+   */
   @Nullable
   public static String sendFile(@NonNull Context context, @NonNull String conversationId,
       @NonNull AttachmentInfo attachment, @Nullable String callId) {
@@ -194,10 +206,19 @@ public final class MessageCommands {
       return null;
     }
 
+    // ★ НОВОЕ: проверяем диалог ДО saveFromFile — иначе файл-сирота
+    // в attachments/<convId>/, если conversationId не существует.
+    ConversationRepository convRepo = new ConversationRepository(appCtx);
+    Conversation conv = convRepo.getById(conversationId);
+    if (conv == null) {
+      log.warn("sendFile: диалог не найден " + conversationId + " — файл не копируем");
+      return null;
+    }
+
     String messageId = UUID.randomUUID().toString();
     long now = System.currentTimeMillis();
 
-    // ★ ФИКС: копируем СИНХРОННО, чтобы вызывающий мог удалить tmp сразу
+    // ★ Копируем СИНХРОННО, чтобы вызывающий мог удалить tmp сразу
     // после возврата messageId — копия уже в attachments/, tmp больше не нужен.
     File saved;
     try {
@@ -218,14 +239,20 @@ public final class MessageCommands {
 
     EXECUTOR.execute(() -> {
       try {
-        ConversationRepository convRepo = new ConversationRepository(appCtx);
         MessageRepository msgRepo = new MessageRepository(appCtx);
         ParticipantRepository partRepo = new ParticipantRepository(appCtx);
         OutboxRepository outboxRepo = new OutboxRepository(appCtx);
 
-        Conversation conv = convRepo.getById(conversationId);
-        if (conv == null) {
-          log.warn("sendFile: диалог не найден " + conversationId);
+        // conv уже проверен выше — но перечитываем, т.к. за время
+        // saveFromFile диалог мог быть удалён.
+        Conversation conv2 = convRepo.getById(conversationId);
+        if (conv2 == null) {
+          log.warn("sendFile: диалог исчез за время копирования " + conversationId);
+          // ★ очистка файла-сироты
+          try {
+            AttachmentStorage.deleteForConversation(appCtx, conversationId);
+          } catch (Exception ignored) {
+          }
           return;
         }
 
@@ -251,6 +278,12 @@ public final class MessageCommands {
         boolean inserted = msgRepo.add(msg);
         if (!inserted) {
           log.warn("sendFile: сообщение уже было " + finalMessageId);
+          // ★ очистка файла-сироты (msgRepo.add упал — Message не создан)
+          try {
+            if (finalSaved.exists())
+              finalSaved.delete();
+          } catch (Exception ignored) {
+          }
           return;
         }
 
@@ -280,6 +313,15 @@ public final class MessageCommands {
   /**
    * Пометить диалог прочитанным: 1. resetUnread. 2. Входящие DELIVERED/SENT → READ. 3. ack READ каждому автору.
    */
+  /**
+   * ★ ИЗМЕНЕНО: markAllRead одним SQL вместо getAllByConversation.
+   *
+   * Было: List<Message> all = msgRepo.getAllByConversation(convId) — загрузка ВСЕХ сообщений в память. Для чата с 10 000 сообщений — OOM на слабых устройствах.
+   *
+   * Стало: msgRepo.markAllRead(convId, now, selfFp) возвращает List<String> messageIds (только те, что обновились). Их передаём в sendReadAck по списку.
+   *
+   * Требует MessageRepository.markAllRead(String convId, long now, String selfFp).
+   */
   public static void markRead(@NonNull Context context, @NonNull String conversationId) {
     if (conversationId == null)
       return;
@@ -293,30 +335,52 @@ public final class MessageCommands {
 
         convRepo.resetUnread(conversationId);
 
-        List<Message> all = msgRepo.getAllByConversation(conversationId);
         long now = System.currentTimeMillis();
         String selfFp = getSelfFingerprint(appCtx);
 
-        int marked = 0;
-        for (Message m : all) {
-          if (!selfFp.isEmpty() && selfFp.equals(m.getSenderFingerprint())) {
-            continue;
-          }
-          if (m.getStatus() == MessageStatus.DELIVERED) {
-            msgRepo.markRead(m.getId(), now);
-            marked++;
-            sendReadAck(appCtx, log, m);
-          } else if (m.getStatus() == MessageStatus.SENT) {
-            msgRepo.markRead(m.getId(), now);
-            marked++;
-            sendReadAck(appCtx, log, m);
+        // ★ Один SQL: UPDATE messages SET status='READ', read_at=?
+        // WHERE conversation_id=? AND sender_fingerprint != ?
+        // AND status IN ('SENT','DELIVERED')
+        // Возвращает messageIds, которые реально обновились.
+        List<String> markedIds = msgRepo.markAllRead(conversationId, now, selfFp);
+        int marked = markedIds != null ? markedIds.size() : 0;
+
+        // ack READ по списку (пока по одному; batched ack — отдельный шаг)
+        if (markedIds != null) {
+          for (String id : markedIds) {
+            try {
+              sendReadAckById(appCtx, log, id, conversationId);
+            } catch (Exception e) {
+              log.warn("markRead: sendReadAck " + shortId(id) + " — " + e.getMessage());
+            }
           }
         }
+
         log.log("markRead: conv=" + shortId(conversationId) + ", marked=" + marked);
       } catch (Exception e) {
         log.logError("markRead error", e);
       }
     });
+  }
+
+  /**
+   * ★ НОВОЕ: ack READ по messageId без загрузки всех сообщений. Используется из markRead (после markAllRead).
+   */
+  private static void sendReadAckById(Context appCtx, MealseLogger log, String messageId,
+      String conversationId) {
+    try {
+      if (messageId == null || messageId.isEmpty())
+        return;
+      MessageRepository msgRepo = new MessageRepository(appCtx);
+      Message m = msgRepo.getById(messageId);
+      if (m == null) {
+        log.warn("sendReadAckById: сообщение " + shortId(messageId) + " не найдено");
+        return;
+      }
+      sendReadAck(appCtx, log, m);
+    } catch (Exception e) {
+      log.logError("sendReadAckById", e);
+    }
   }
 
   // ============================================================
@@ -328,6 +392,13 @@ public final class MessageCommands {
    *
    * ★ ИСПРАВЛЕНО (шаг 17.1): nodeKey для участника выбирается с приоритетом Wi-Fi Direct, если к этому же deviceId есть активное WD-соединение. Раньше при participants.nodeKey = HTTP (192.168.1.123:8081), а WD был подключён — первые попытки летели по HTTP, падали (ConnectException), и только после 2 retry (44 сек) шли через WD.
    */
+  /**
+   * ★ ИЗМЕНЕНО: + failover существующих pending-сообщений с HTTP-nodeKey на WD-nodeKey, если WD подключён к тому же deviceId.
+   *
+   * Было: WD-приоритет срабатывал только при новом enqueue. Если сообщение уже висело в HTTP-outbox (attempt 1/2/3), а WD подключился позже — DeliveryScheduler продолжал HTTP-retry (в логах: 21:15:21 → 21:16:17, attempt 1/2/3), пока не истекал backoff.
+   *
+   * Стало: после основного enqueue — перекладываем pending-записи с HTTP-nodeKey на WD-nodeKey. Дополняет failover WD → HTTP в DeliveryScheduler.onSendResult (теперь есть оба направления).
+   */
   private static void enqueueForAllParticipants(Context appCtx, MealseLogger log,
       ConversationRepository convRepo, ParticipantRepository partRepo, OutboxRepository outboxRepo,
       String conversationId, String messageId, String selfFp, String selfDeviceId,
@@ -335,7 +406,7 @@ public final class MessageCommands {
     List<Participant> participants = partRepo.getByConversation(conversationId);
     int enqueued = 0;
 
-    // ★ НОВОЕ: получаем WD-соединение один раз на всех участников.
+    // ★ получаем WD-соединение один раз на всех участников
     String wdConnectedDeviceId = null;
     try {
       if (appCtx instanceof com.my.mealse.MealseApp) {
@@ -361,9 +432,7 @@ public final class MessageCommands {
 
       String nodeKey = p.getNodeKey();
 
-      // ★ НОВОЕ: если WD подключён к тому же deviceId, что и участник —
-      // приоритет WD-nodeKey. Это резко ускоряет доставку, пока HTTP-попытки
-      // будут падать (например, узел в другой подсети / Wi-Fi отключён).
+      // ★ если WD подключён к тому же deviceId — приоритет WD-nodeKey
       if (wdConnectedDeviceId != null && wdConnectedDeviceId.equals(p.getDeviceId())) {
         String wdKey = findWifiDirectNodeKey(appCtx, p.getDeviceId(), p.getFingerprint());
         if (wdKey != null && !wdKey.isEmpty()) {
@@ -383,8 +452,79 @@ public final class MessageCommands {
         enqueued++;
       }
     }
+
+    // ★ НОВОЕ: failover существующих pending на WD.
+    // Если WD подключён — перекладываем HTTP-nodeKey на WD-nodeKey.
+    if (wdConnectedDeviceId != null) {
+      try {
+        failoverPendingToWifiDirect(appCtx, log, outboxRepo, participants, wdConnectedDeviceId);
+      } catch (Exception e) {
+        log.warn("enqueue: failoverPendingToWifiDirect: " + e.getMessage());
+      }
+    }
+
     log.log("enqueue: msg=" + shortId(messageId) + ", targets=" + enqueued + ", callId="
         + shortId(callId));
+  }
+
+  /**
+   * ★ НОВОЕ: перекладывает pending-сообщения с HTTP-nodeKey на WD-nodeKey для участников, к чьему deviceId подключён WD.
+   *
+   * Использует OutboxRepository.getByTarget(httpNodeKey) — стандартный метод. Для каждого pending-сообщения: remove → enqueue с WD-nodeKey.
+   */
+  private static void failoverPendingToWifiDirect(Context appCtx, MealseLogger log,
+      OutboxRepository outboxRepo, List<Participant> participants, String wdConnectedDeviceId) {
+    if (participants == null || participants.isEmpty())
+      return;
+
+    // Собираем все HTTP-nodeKey участников, к чьему deviceId подключён WD.
+    java.util.Set<String> httpNodeKeys = new java.util.HashSet<>();
+    for (Participant p : participants) {
+      if (p.getDeviceId() == null || !wdConnectedDeviceId.equals(p.getDeviceId()))
+        continue;
+      String httpKey = p.getNodeKey();
+      if (httpKey != null && !httpKey.isEmpty())
+        httpNodeKeys.add(httpKey);
+    }
+    if (httpNodeKeys.isEmpty())
+      return;
+
+    for (String httpKey : httpNodeKeys) {
+      List<com.my.mealse.messenger.data.entity.OutboxEntity> pending = outboxRepo
+          .getByTarget(httpKey);
+      if (pending == null || pending.isEmpty())
+        continue;
+
+      // WD-nodeKey для того же deviceId
+      String wdKey = null;
+      for (Participant p : participants) {
+        if (p.getDeviceId() == null || !wdConnectedDeviceId.equals(p.getDeviceId()))
+          continue;
+        wdKey = findWifiDirectNodeKey(appCtx, p.getDeviceId(), p.getFingerprint());
+        if (wdKey != null && !wdKey.isEmpty())
+          break;
+      }
+      if (wdKey == null || wdKey.isEmpty() || wdKey.equals(httpKey))
+        continue;
+
+      int moved = 0;
+      for (com.my.mealse.messenger.data.entity.OutboxEntity e : pending) {
+        try {
+          outboxRepo.remove(e.id);
+          String newId = outboxRepo.enqueue(e.messageId, e.conversationId, wdKey,
+              e.targetFingerprint);
+          if (newId != null) {
+            DeliveryScheduler.get(appCtx).enqueue(newId);
+            moved++;
+          }
+        } catch (Exception ex) {
+          log.warn("failoverPendingToWifiDirect: " + shortId(e.id) + " — " + ex.getMessage());
+        }
+      }
+      if (moved > 0) {
+        log.log("failoverPendingToWifiDirect: " + httpKey + " → " + wdKey + ", moved=" + moved);
+      }
+    }
   }
 
   /**

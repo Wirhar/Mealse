@@ -43,6 +43,9 @@ import java.util.concurrent.Executors;
 import com.my.mealse.messenger.model.ConversationType;
 import com.my.mealse.messenger.model.ParticipantRole;
 
+import java.io.IOException;
+import java.io.RandomAccessFile;
+
 /**
  * Приём входящих сообщений из broadcast com.my.mealse.SIGNAL.
  *
@@ -328,6 +331,19 @@ public class MessageReceiver extends BroadcastReceiver {
         CHUNK_TRACKERS.remove(d.messageId);
         return;
       }
+
+      // ★ НОВОЕ: если первый чанк пришёл без conversation_id, а этот — с ним,
+      // обновляем tracker. Иначе assembleFile создаст PRIVATE вместо CALL.
+      if ((tracker.conversationId == null || tracker.conversationId.isEmpty())
+          && d.conversationId != null && !d.conversationId.isEmpty()) {
+        tracker.conversationId = d.conversationId;
+        log.log("handleFileChunk: обновлён conversationId tracker → " + shortId(d.conversationId));
+      }
+      // ★ То же для fileMime / fileName (могли прийти в другом чанке)
+      if ((tracker.fileMime == null || tracker.fileMime.isEmpty()) && d.fileMime != null
+          && !d.fileMime.isEmpty()) {
+        tracker.fileMime = d.fileMime;
+      }
     }
 
     // Дедупликация чанка
@@ -365,10 +381,20 @@ public class MessageReceiver extends BroadcastReceiver {
     }
   }
 
-  private volatile long lastCleanupAt = 0L;
+  /**
+   * ★ ИЗМЕНЕНО: lastCleanupAt — static volatile, а не instance.
+   *
+   * MessageReceiver создаётся заново на каждый вызов (new MessageReceiver() в MealseApp/ServerService). Instance-поле lastCleanupAt всегда 0 → maybeCleanupStaleTrackers запускал cleanupStaleTrackers НА КАЖДЫЙ ЧАНК (80 проходов по CHUNK_TRACKERS для файла 20 МБ). Теперь — раз в 5 с на процесс.
+   */
+  private static volatile long lastCleanupAt = 0L;
+
+  /** ★ ИЗМЕНЕНО: интервал чистки — static, чтобы не дублировать в instance. */
   private static final long CLEANUP_INTERVAL_MS = 5_000L;
 
-  private void maybeCleanupStaleTrackers(MealseLogger log) {
+  /**
+   * ★ ИЗМЕНЕНО: static + static volatile lastCleanupAt. MessageReceiver создаётся на каждый onReceive — instance-поле сбрасывалось в 0 → чистка на каждый чанк. Теперь — раз в 5 с на процесс.
+   */
+  private static void maybeCleanupStaleTrackers(MealseLogger log) {
     long now = System.currentTimeMillis();
     if (now - lastCleanupAt < CLEANUP_INTERVAL_MS)
       return;
@@ -542,7 +568,10 @@ public class MessageReceiver extends BroadcastReceiver {
     }
   }
 
-  private void deletePartFile(ChunkTracker tracker, MealseLogger log) {
+  /**
+   * ★ ИЗМЕНЕНО: static — вызывается из static cleanupStaleTrackers.
+   */
+  private static void deletePartFile(ChunkTracker tracker, MealseLogger log) {
     if (tracker == null || tracker.partFile == null)
       return;
     try {
@@ -569,7 +598,10 @@ public class MessageReceiver extends BroadcastReceiver {
   /**
    * Удаляет .part-файлы и trackers старше CHUNK_COLLECT_TIMEOUT_MS. Вызывается при создании нового tracker (редко, не на каждый чанк).
    */
-  private void cleanupStaleTrackers(MealseLogger log) {
+  /**
+   * ★ ИЗМЕНЕНО: static — не использует instance-поля, только static CHUNK_TRACKERS и deletePartFile.
+   */
+  private static void cleanupStaleTrackers(MealseLogger log) {
     long now = System.currentTimeMillis();
     for (String msgId : new HashSet<>(CHUNK_TRACKERS.keySet())) {
       ChunkTracker t = CHUNK_TRACKERS.get(msgId);
@@ -729,9 +761,19 @@ public class MessageReceiver extends BroadcastReceiver {
           newConv = ConversationMapper.toModel(callConv);
           log.log("handleRegularMessage: используем CALL-чат id=" + shortId(newConv.getId()));
         } else {
-          // Fallback: создаём PRIVATE с явным id
-          newConv = convRepo.getOrCreatePrivateWithId(conversationId, envelope.from_fingerprint,
-              "Устройство " + shortId(envelope.from_fingerprint));
+          // ★ НОВОЕ: перед созданием PRIVATE с явным id проверяем,
+          // не занят ли этот id CALL-чатом (гонка: CallActivity.initCallConversation
+          // мог создать CALL параллельно). Если занят — используем его.
+          ConversationEntity existingById = convRepo.getEntityByCallId(conversationId);
+          if (existingById != null) {
+            newConv = ConversationMapper.toModel(existingById);
+            log.log("handleRegularMessage: conversationId=" + shortId(conversationId)
+                + " уже занят CALL-чатом — используем его");
+          } else {
+            // Fallback: создаём PRIVATE с явным id
+            newConv = convRepo.getOrCreatePrivateWithId(conversationId, envelope.from_fingerprint,
+                "Устройство " + shortId(envelope.from_fingerprint));
+          }
         }
 
         if (newConv == null) {

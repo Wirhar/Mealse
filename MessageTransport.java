@@ -18,21 +18,49 @@ import java.io.InputStream;
 import java.util.Arrays;
 
 /**
- * Фасад транспорта: выбирает HttpMessageSender / WifiDirectMessageSender по targetNode.mode.
+ * Фасад транспорта: выбирает HttpMessageSender / WifiDirectMessageSender
+ * по targetNode.mode.
  *
- * ★ send (JSON): TEXT / ack / candidate и т.п. - mode == WIFI_DIRECT → WifiDirectMessageSender (JSON-кадр TYPE_JSON_SIGNAL) - иначе → HttpMessageSender (POST /signal/<type>)
+ * ★ send (JSON): TEXT / ack / candidate и т.п.
+ *   - mode == WIFI_DIRECT → WifiDirectMessageSender (JSON-кадр TYPE_JSON_SIGNAL)
+ *   - иначе → HttpMessageSender (POST /signal/<type>)
  *
- * ★ sendFile (бинарный): FILE через /signal/file (HTTP) или чанки (WD). - mode == WIFI_DIRECT → FileChunkProtocol: файл режется на чанки по 512 КБ raw, каждый — отдельный JSON {type:"file_chunk", ...} через WifiDirectManager.sendSignal. - иначе → FileMessageSender (HTTP POST /signal/file, streaming 64 КБ буфер, с ProgressCallback).
+ * ★ sendFile (бинарный): FILE через /signal/file (HTTP) или чанки (WD).
+ *   - mode == WIFI_DIRECT → FileChunkProtocol: файл режется на чанки
+ *     по CHUNK_SIZE (256 КБ raw), каждый — отдельный JSON
+ *     {type:"file_chunk", ...} через WifiDirectManager.sendSignal.
+ *   - иначе → FileMessageSender (HTTP POST /signal/file, streaming 64 КБ
+ *     буфер, с ProgressCallback).
  *
- * ★ Улучшение №4: WD-ветка через чанки. Было: base64 всего файла в один JSON-кадр. Для файла 6+ МБ base64 > 8 МБ (WifiDirectFrame.MAX_FRAME_SIZE) → receiveLoop на B видит frameLength > MAX_MSG_SIZE → break → соединение рвётся.
+ * ★ Улучшение №4: WD-ветка через чанки. Было: base64 всего файла в один
+ * JSON-кадр. Для файла 6+ МБ base64 > 8 МБ (WifiDirectFrame.MAX_FRAME_SIZE)
+ * → receiveLoop на B видит frameLength > MAX_MSG_SIZE → break → соединение
+ * рвётся. Стало: FileChunkProtocol. Каждый чанк — отдельный JSON,
+ * кадр ≤ 8 МБ гарантированно.
  *
- * Стало: FileChunkProtocol (CHUNK_SIZE = 512 КБ). Каждый чанк — отдельный JSON {type:"file_chunk", message_id, chunk_index, total_chunks, ..., data_base64: ~683 КБ}. Кадр ≤ 8 МБ гарантированно.
+ * Порядок НЕ важен: B собирает через RandomAccessFile.seek(
+ * chunk_index * CHUNK_SIZE). Даже 1,3,2,0,4 — файл соберётся.
  *
- * Порядок НЕ важен: B собирает через RandomAccessFile.seek( chunk_index * CHUNK_SIZE). Даже 1,3,2,0,4 — файл соберётся.
+ * Callback: только на последнем чанке (для DeliveryScheduler.onSendResult).
+ * Промежуточные — noop. Прогресс для WD не показываем (быстро, нет смысла).
  *
- * Callback: только на последнем чанке (для DeliveryScheduler.onSendResult). Промежуточные — noop (fire-and-forget, ошибки не отслеживаем). Прогресс для WD не показываем (20 чанков × 100мс = 2с, нет смысла).
+ * Ack DELIVERED придёт от MessageReceiver после сборки. Если не придёт —
+ * DeliveryScheduler.markAttempt → retry whole file (outbox).
  *
- * Ack DELIVERED придёт от MessageReceiver после сборки. Если не придёт — DeliveryScheduler.markAttempt → retry whole file (outbox).
+ * ★ ИЗМЕНЕНО (BUG-MT1):
+ *   sendFileWifiDirect больше не вызывает callback.onResult ДВАЖДЫ для
+ *   последнего чанка при queued=false. Раньше: chunkCb вызывал
+ *   callback.onResult(result), затем `if (!queued[0])` вызывал
+ *   callback.onResult(error) — второй onResult → DeliveryScheduler
+ *   onSendResult дважды → markAttempt дважды → сдвиг backoff.
+ *   Теперь: при !queued[0] callback.onResult вызывается ТОЛЬКО если
+ *   !isLast (для последнего его уже вызвал chunkCb).
+ *
+ * ★ ИЗМЕНЕНО (BUG-MT6):
+ *   findNode поддерживает "mac:0" (WD-ключ): если ip не парсится как
+ *   ip:port, ищем через nodeManager.findAllByDeviceId(ip) — MAC-адрес
+ *   как deviceId. Раньше findNode("mac:0") возвращал null → HTTP-ветка
+ *   падала (HttpMessageSender пытался POST на "mac:0").
  */
 public class MessageTransport {
 
@@ -102,7 +130,14 @@ public class MessageTransport {
   }
 
   /**
-   * ★ ФИКС: true, если: - WD-соединение установлено (wdm.isConnected()); - remotePeer.deviceId совпадает с target.deviceId (то же физическое устройство); - target.mode != WIFI_DIRECT (иначе сработает обычная WD-ветка). Это позволяет отправлять по WD, даже если в NodeManager узел записан как HTTP.
+   * ★ ФИКС: true, если:
+   *  - WD-соединение установлено (wdm.isConnected());
+   *  - remotePeer.deviceId совпадает с target.deviceId (то же физическое
+   *    устройство);
+   *  - target.mode != WIFI_DIRECT (иначе сработает обычная WD-ветка).
+   *
+   * Это позволяет отправлять по WD, даже если в NodeManager узел записан
+   * как HTTP.
    */
   private boolean shouldUseWifiDirect(@Nullable TrustedNode target) {
     if (target == null)
@@ -141,9 +176,12 @@ public class MessageTransport {
   /**
    * Отправить файл.
    *
-   * HTTP (mode != WIFI_DIRECT): FileMessageSender.sendFile(..., progress, callback) — streaming, прогресс каждые 100 мс.
+   * HTTP (mode != WIFI_DIRECT): FileMessageSender.sendFile(..., progress,
+   * callback) — streaming, прогресс каждые 100 мс.
    *
-   * WD (mode == WIFI_DIRECT): FileChunkProtocol — цикл чанков 512 КБ через WifiDirectManager.sendSignal. progress игнорируется. callback срабатывает только на последнем чанке.
+   * WD (mode == WIFI_DIRECT): FileChunkProtocol — цикл чанков через
+   * WifiDirectManager.sendSignal. progress игнорируется. callback
+   * срабатывает только на последнем чанке.
    */
   public void sendFile(@NonNull String targetNodeKey, @NonNull MessageEnvelope envelope,
       @NonNull File file, @Nullable FileMessageSender.ProgressCallback progress,
@@ -171,31 +209,40 @@ public class MessageTransport {
   // ============================================================
 
   /**
-   * Отправка файла чанками через WD.
+   * ★ ИЗМЕНЕНО (BUG-MT1, финал): отправка файла чанками через Wi-Fi Direct.
    *
-   * Шаги: 1. Проверки: file существует, size > 0, size ≤ MAX_FILE_SIZE. 2. totalChunks = FileChunkProtocol.chunkCount(size). 3. FileInputStream + буфер CHUNK_SIZE (512 КБ). 4. Цикл: read → buildChunkJson → wdSender.send (noop на промежуточных, callback на последнем) → Thread.sleep(100) между кадрами.
+   * Проверено под приложенные файлы:
+   *  - FileChunkProtocol.buildChunkJson — 13 параметров, сигнатура совпадает;
+   *  - FileChunkProtocol.CHUNK_SIZE = 256 КБ, CHUNK_SEND_DELAY_MS = 150,
+   *    MAX_FILE_SIZE = 20 МБ, chunkCount(long), offsetFor(int) — консистентны;
+   *  - MessageSender.Callback — SAM (единственный onResult) → лямбда ок;
+   *  - SendResult.error(String, String, long) и SendResult.isSuccess() — есть.
    *
-   * Ошибки: - file.length() > MAX_FILE_SIZE → error. - totalChunks == 0 → error. - IOException → error. - wdSender.send на последнем чанке вернёт error (WD отключился) → callback.onResult(error) → DeliveryScheduler.markAttempt → retry.
-   */
-  /**
-   * ★ ИЗМЕНЕНО (правка E, финал — под реальную сигнатуру buildChunkJson): отправка файла чанками через Wi-Fi Direct.
+   * Сохранено из исходного рабочего кода:
+   *  - 13-параметрический buildChunkJson;
+   *  - проверка wdm.isConnected() на КАЖДОМ чанке;
+   *  - NOOP-семантика для промежуточных чанков (реальный callback — только
+   *    на последнем, чтобы DeliveryScheduler узнал результат);
+   *  - лог «чанк i/N (rB, json=...chars) [LAST]»;
+   *  - общий try/catch с elapsed в SendResult.error.
    *
-   * Сохранено из исходного рабочего кода: - вызов buildChunkJson(message_id, conversation_id, chunkIndex, totalChunks, fileName, fileMime, size, from_device_id, from_fingerprint, to_fingerprint, sentAt, chunk) — 13 параметров; - проверка wdm.isConnected() на КАЖДОМ чанке (WD мог отвалиться посреди передачи → сразу error, не «долбим» мёртвый сокет); - NOOP_CALLBACK для промежуточных чанков, реальный callback — для последнего (чтобы DeliveryScheduler узнал результат); - лог «чанк i/N (rB, json=...chars) [LAST]»; - общий try/catch с elapsed в SendResult.error.
+   * ★ ИСПРАВЛЕНО (BUG-MT1):
+   *   callback.onResult больше не вызывается ДВАЖДЫ для последнего чанка
+   *   при queued=false. Раньше chunkCb вызывал callback.onResult(result)
+   *   для isLast, а затем `if (!queued[0])` вызывал callback.onResult(error)
+   *   — второй onResult → DeliveryScheduler.onSendResult дважды →
+   *   markAttempt дважды → сдвиг backoff. Теперь при !queued[0]
+   *   callback.onResult(error) вызывается ТОЛЬКО если !isLast.
    *
-   * Добавлено (правка E): 1. Проверка queued от wdSender.send для КАЖДОГО чанка, а не только для последнего. Раньше промежуточные шли через NOOP_CALLBACK — ошибка «не поставлен в очередь» терялась, и мы продолжали слать оставшиеся чанки в переполненный/мёртвый сокет → обрыв WD. Теперь при queued=false — прерываем цикл и возвращаем error → DeliveryScheduler.markAttempt → retry whole file. 2. Дочитываем чанк до want (в цикле), а не одним in.read(buf). Причина: FileChunkProtocol.buildChunkJson отвергает chunkBytes.length > CHUNK_SIZE (ок), но на последнем чанке read < CHUNK_SIZE — это нормально; а вот если InputStream вернёт меньше want на ПРОМЕЖУТОЧНОМ чанке, то offsetFor() на B разъедется и файл соберётся битым. Дочитывание в цикле это исключает.
-   *
-   * CHUNK_SIZE и CHUNK_SEND_DELAY_MS уже уменьшены/увеличены в FileChunkProtocol (правки D/E), здесь их не дублируем.
-   */
-  /**
-   * ★ ИЗМЕНЕНО (правка E, финал): отправка файла чанками через Wi-Fi Direct.
-   *
-   * Проверено под приложенные файлы: - FileChunkProtocol.buildChunkJson — 13 параметров, сигнатура совпадает; - FileChunkProtocol.CHUNK_SIZE = 256 КБ, CHUNK_SEND_DELAY_MS = 150, MAX_FILE_SIZE = 20 МБ, chunkCount(long), offsetFor(int) — консистентны; - MessageSender.Callback — SAM (единственный onResult) → лямбда ок; - SendResult.error(String, String, long) и SendResult.isSuccess() — есть; - MessageTransport: поля wdm, wdSender, log; импорт java.util.Arrays.
-   *
-   * Сохранено из исходного рабочего кода: - 13-параметрический buildChunkJson; - проверка wdm.isConnected() на КАЖДОМ чанке; - NOOP-семантика для промежуточных чанков (реальный callback — только на последнем, чтобы DeliveryScheduler узнал результат); - лог «чанк i/N (rB, json=...chars) [LAST]»; - общий try/catch с elapsed в SendResult.error.
-   *
-   * Добавлено (правка E): 1. Проверка queued от wdSender.send для КАЖДОГО чанка. Раньше промежуточные шли через NOOP_CALLBACK — ошибка «не поставлен в очередь» терялась, и мы продолжали слать оставшиеся чанки в переполненный/мёртвый сокет → обрыв WD. Теперь queued=false → error → DeliveryScheduler.markAttempt → retry whole file. 2. Дочитываем чанк до want в цикле (а не одним in.read(buf)), иначе на медленном InputStream промежуточный чанк короче CHUNK_SIZE → offsetFor() на B разъедется → файл битый. 3. lock.wait(2000) обёрнут в try/catch (InterruptedException) — иначе метод не компилируется (wait бросает checked-исключение).
-   *
-   * CHUNK_SIZE = 256 КБ и CHUNK_SEND_DELAY_MS = 150 уже в FileChunkProtocol (правки D/E), здесь не дублируются.
+   * ★ Сохранено (правка E):
+   *  1. Проверка queued от wdSender.send для КАЖДОГО чанка — раньше
+   *     промежуточные шли через NOOP_CALLBACK, ошибка «не поставлен в
+   *     очередь» терялась, и мы продолжали слать оставшиеся чанки в
+   *     переполненный/мёртвый сокет → обрыв WD.
+   *  2. Дочитываем чанк до want в цикле (а не одним in.read(buf)) —
+   *     иначе на медленном InputStream промежуточный чанк короче
+   *     CHUNK_SIZE → offsetFor() на B разъедется → файл битый.
+   *  3. lock.wait(2000) обёрнут в try/catch (InterruptedException).
    */
   private void sendFileWifiDirect(@NonNull String targetNodeKey, @NonNull MessageEnvelope envelope,
       @NonNull File file, @NonNull MessageSender.Callback callback) {
@@ -217,7 +264,6 @@ public class MessageTransport {
       return;
     }
 
-    // ★ Используем this.wdm (поле класса), как в исходном рабочем коде.
     if (wdm == null || !wdm.isConnected()) {
       callback.onResult(SendResult.error("wifidirect", "Wi-Fi Direct не подключён",
           System.currentTimeMillis() - start));
@@ -287,12 +333,10 @@ public class MessageTransport {
         final boolean isLast = (i == totalChunks - 1);
         final int chunkIndex = i;
 
-        // ★ ИЗМЕНЕНО: проверяем queued для КАЖДОГО чанка, а не только
-        // для последнего. Раньше промежуточные шли через NOOP_CALLBACK —
-        // ошибка «не поставлен в очередь» терялась, и мы продолжали
-        // слать оставшиеся чанки в переполненный/мёртвый сокет → обрыв WD.
-        // Теперь queued=false → error → DeliveryScheduler.markAttempt →
-        // retry whole file (лучше retry, чем обрыв WD).
+        // ★ Проверяем queued для КАЖДОГО чанка, а не только для последнего.
+        // Раньше промежуточные шли через NOOP_CALLBACK — ошибка «не
+        // поставлен в очередь» терялась, и мы продолжали слать оставшиеся
+        // чанки в переполненный/мёртвый сокет → обрыв WD.
         final boolean[] queued = new boolean[] { false };
         final Object lock = new Object();
         // MessageSender.Callback — SAM (единственный onResult) → лямбда ок.
@@ -310,7 +354,6 @@ public class MessageTransport {
         // wdSender.send синхронный (wdm.sendSignal возвращает boolean,
         // callback вызывается сразу внутри send). wait(2000) — safety-net
         // на случай, если в вашей версии send асинхронный.
-        // ★ wait бросает checked InterruptedException — обёрнут в try/catch.
         synchronized (lock) {
           if (!queued[0]) {
             try {
@@ -326,9 +369,15 @@ public class MessageTransport {
         if (!queued[0]) {
           log.warn("sendFileWifiDirect: чанк " + (chunkIndex + 1) + "/" + totalChunks
               + " НЕ поставлен в очередь — прерываем, error для retry");
-          callback.onResult(
-              SendResult.error("wifidirect", "chunk " + chunkIndex + " not queued (WD перегружен?)",
-                  System.currentTimeMillis() - start));
+          // ★ ИСПРАВЛЕНО (BUG-MT1): для последнего чанка callback.onResult
+          // уже вызвал chunkCb. Не вызываем второй раз — иначе
+          // DeliveryScheduler.onSendResult получит два error → markAttempt
+          // дважды → сдвиг backoff.
+          if (!isLast) {
+            callback.onResult(SendResult.error("wifidirect",
+                "chunk " + chunkIndex + " not queued (WD перегружен?)",
+                System.currentTimeMillis() - start));
+          }
           return;
         }
 
@@ -367,6 +416,17 @@ public class MessageTransport {
   // Хелперы
   // ============================================================
 
+  /**
+   * ★ ИЗМЕНЕНО (BUG-MT6): поддерживает два формата nodeKey:
+   *  1. "ip:port" — стандартный (192.168.1.123:8081);
+   *  2. "mac:0"  — WD-ключ из WifiDirectManager.getRemotePeer().deviceAddress
+   *     (mac-адрес устройства, порт 0). Раньше findNode("mac:0") пытался
+   *     Integer.parseInt("0") → 0, findByIpPort("mac", 0) → null → HTTP-ветка
+   *     падала (HttpMessageSender POST на "mac:0").
+   *
+   * Теперь: если ip не парсится как ip:port, ищем через
+   * nodeManager.findAllByDeviceId(ip) — MAC как deviceId.
+   */
   @Nullable
   private TrustedNode findNode(String nodeKey) {
     if (nodeKey == null)
@@ -375,12 +435,35 @@ public class MessageTransport {
     if (idx <= 0)
       return null;
     String ip = nodeKey.substring(0, idx);
-    int port;
+    String portStr = nodeKey.substring(idx + 1);
+
+    // ★ Сначала пробуем как ip:port (стандартный HTTP-ключ)
     try {
-      port = Integer.parseInt(nodeKey.substring(idx + 1));
+      int port = Integer.parseInt(portStr);
+      TrustedNode byIp = nodeManager.findByIpPort(ip, port);
+      if (byIp != null) {
+        return byIp;
+      }
     } catch (NumberFormatException e) {
-      return null;
+      // Порт не число — это не ip:port, пробуем WD-ключ ниже
     }
-    return nodeManager.findByIpPort(ip, port);
+
+    // ★ Fallback: WD-ключ "mac:0". Ищем по deviceId == MAC.
+    // WifiDirectManager.getRemotePeer().deviceAddress — это MAC.
+    try {
+      java.util.List<TrustedNode> byDevice = nodeManager.findAllByDeviceId(ip);
+      if (byDevice != null && !byDevice.isEmpty()) {
+        for (TrustedNode n : byDevice) {
+          if (n.getMode() == TrustedNode.Mode.WIFI_DIRECT
+              && n.getIpAddress() != null && !n.getIpAddress().isEmpty()) {
+            return n;
+          }
+        }
+        return byDevice.get(0);
+      }
+    } catch (Exception ignored) {
+    }
+
+    return null;
   }
 }
