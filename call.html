@@ -25,14 +25,12 @@
       width: 100%; height: 100%;
       object-fit: cover;
     }
-
-    /* ★ Кнопка переключения камеры — поверх верхней части localVideo, без фона. */
     #switchCameraBtn {
       position: absolute;
       top: 20px;
       right: 20px;
-      width: 120px;              /* как localVideo */
-      height: 40px;              /* верхняя полоска */
+      width: 120px;
+      height: 40px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -56,7 +54,6 @@
       opacity: 0.4;
       pointer-events: none;
     }
-
     #controls {
       position: absolute; bottom: 40px;
       width: 100%; text-align: center;
@@ -113,10 +110,20 @@
     let currentFacingMode = 'user';
     let cameraSwitching = false;
 
+    // ★ НОВОЕ (4.1): состояние фона, треков и watchdog
+    let appForegrounded = true;
+    let videoTrackDead = false;
+    let audioTrackDead = false;
+    let lastOfferSdp = null;
+    let lastAnswerSdp = null;
+    let disconnectWatchdog = null;
+    let remoteStallNotified = false;
+    let lastRxVideoPkts = -1;
+    let rxVideoStallSamples = 0;
+
     // ================ DOM ================
     const localVideo = document.getElementById('localVideo');
     const remoteVideo = document.getElementById('remoteVideo');
-    // ★ #status УДАЛЁН — statusEl больше не нужен.
 
     // ================ ICE-серверы ================
     let iceServers = [
@@ -125,10 +132,6 @@
     ];
 
     // ================ Утилиты ================
-    /**
-     * ★ ИЗМЕНЕНО: раньше показывало текст на экране (в #status).
-     * Теперь #status нет — только лог в console/logcat.
-     */
     function setStatus(text) {
       console.log('[STATUS]', text);
     }
@@ -182,8 +185,14 @@
             }
           });
         }
+        // ★ ИЗМЕНЕНО (рекомендация): если серверов нет и режим host-only —
+        // явно очищаем iceServers. Защита от неправильного порядка
+        // configureIce / configureIceMode.
         if (servers.length > 0) {
           iceServers = servers;
+        } else if (iceMode === 'WIFI_DIRECT' || iceMode === 'GATEWAY') {
+          iceServers = [];
+          log('configureIce: серверов нет + host-only режим → iceServers = []');
         }
         log('configureIce: ' + JSON.stringify(iceServers));
         setStatus('ICE: ' + iceServers.length + ' сервер(ов)');
@@ -192,6 +201,7 @@
       }
     };
 
+    // ★ ИЗМЕНЕНО (4.2): WIFI_DIRECT и GATEWAY реально очищают iceServers
     window.configureIceMode = function(mode, gwIp, gwPort) {
       try {
         iceMode = (mode || 'AUTO').toUpperCase();
@@ -204,16 +214,17 @@
         log('  gatewayPort=' + gatewayPort);
         log('  iceServers до коррекции: ' + JSON.stringify(iceServers));
 
-        if (iceMode === 'GATEWAY') {
+        if (iceMode === 'GATEWAY' || iceMode === 'WIFI_DIRECT') {
           iceServers = [];
-          log('  → GATEWAY: iceServers очищены (используем только host)');
-          setStatus('Режим: через шлюз (VPN)');
+          log('  → ' + iceMode + ': iceServers очищены (host-only)');
+          setStatus(iceMode === 'GATEWAY' ? 'Режим: через шлюз (VPN)' : 'Режим: Wi-Fi Direct');
         } else if (iceMode === 'DIRECT') {
-          log('  → DIRECT: используем P2P (STUN/host), шлюз отключён');
+          iceServers = (iceServers || []).filter(s => {
+            const u = (s.urls || '').toString();
+            return u.startsWith('stun:');
+          });
+          log('  → DIRECT: iceServers = ' + JSON.stringify(iceServers) + ' (только STUN)');
           setStatus('Режим: прямое подключение');
-        } else if (iceMode === 'WIFI_DIRECT') {
-          log('  → WIFI_DIRECT: используем host (прямой Wi-Fi)');
-          setStatus('Режим: Wi-Fi Direct');
         } else {
           log('  → AUTO: пробуем IPv6 → STUN → host → шлюз');
           setStatus('Режим: авто');
@@ -265,6 +276,9 @@
         log('getUserMedia OK: video tracks=' + localStream.getVideoTracks().length
             + ', audio tracks=' + localStream.getAudioTracks().length);
 
+        // ★ НОВОЕ (4.3): watchers на треки
+        attachTrackWatchers();
+
         const vt = localStream.getVideoTracks()[0];
         if (vt) {
           const s = vt.getSettings();
@@ -305,6 +319,90 @@
         initializing = false;
       }
     }
+
+    // ================ ★ НОВОЕ (4.4): watchers треков + восстановление ================
+
+    function attachTrackWatchers() {
+      if (!localStream) return;
+      localStream.getTracks().forEach(track => {
+        track.onended = () => {
+          log('track ENDED: ' + track.kind);
+          if (track.kind === 'video') videoTrackDead = true; else audioTrackDead = true;
+          if (appForegrounded) ensureLocalTracks();
+        };
+        track.onmute = () => {
+          log('track MUTED: ' + track.kind);
+          if (track.kind === 'video') videoTrackDead = true; else audioTrackDead = true;
+        };
+        track.onunmute = () => {
+          log('track UNMUTED: ' + track.kind);
+          if (track.kind === 'video') videoTrackDead = false; else audioTrackDead = false;
+        };
+      });
+    }
+
+    async function ensureLocalTracks() {
+      if (!localStream || !peerConnection) return;
+      const vt = localStream.getVideoTracks()[0];
+      const at = localStream.getAudioTracks()[0];
+      const needVideo = videoTrackDead || !vt || vt.readyState === 'ended';
+      const needAudio = audioTrackDead || !at || at.readyState === 'ended';
+      if (!needVideo && !needAudio) return;
+
+      log('ensureLocalTracks: video=' + needVideo + ', audio=' + needAudio);
+      try {
+        const fresh = await navigator.mediaDevices.getUserMedia({
+          video: needVideo ? { facingMode: { ideal: currentFacingMode } } : false,
+          audio: needAudio
+        });
+        for (const newTrack of fresh.getTracks()) {
+          const sender = peerConnection.getSenders()
+              .find(s => s.track && s.track.kind === newTrack.kind);
+          const old = newTrack.kind === 'video' ? vt : at;
+          if (sender) {
+            try { await sender.replaceTrack(newTrack); } catch (e) {
+              log('ensureLocalTracks: replaceTrack error: ' + e.message);
+            }
+          }
+          if (old) {
+            try { old.stop(); } catch (e) {}
+            localStream.removeTrack(old);
+          }
+          localStream.addTrack(newTrack);
+          if (newTrack.kind === 'video') videoTrackDead = false; else audioTrackDead = false;
+          log('ensureLocalTracks: ' + newTrack.kind + ' заменён');
+        }
+        attachTrackWatchers();
+        localVideo.srcObject = null;
+        localVideo.srcObject = localStream;
+        const p = localVideo.play();
+        if (p && p.catch) p.catch(e => log('localVideo.play: ' + e.message));
+      } catch (e) {
+        log('ensureLocalTracks FAILED: ' + e.message);
+      }
+    }
+
+    window.onAppBackgrounded = function() {
+      appForegrounded = false;
+      log('onAppBackgrounded');
+    };
+
+    window.onAppForegrounded = async function() {
+      appForegrounded = true;
+      log('onAppForegrounded');
+      await ensureLocalTracks();
+      if (peerConnection) {
+        const st = peerConnection.connectionState;
+        if (st === 'failed' || st === 'disconnected') {
+          attemptIceRestart();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') window.onAppForegrounded();
+      else window.onAppBackgrounded();
+    });
 
     // ================ Кнопка переключения камеры ================
 
@@ -402,6 +500,8 @@
 
         localStream.addTrack(newVideoTrack);
 
+        // ★ Переустановка srcObject — на некоторых WebView иначе не перерисовывается
+        localVideo.srcObject = null;
         localVideo.srcObject = localStream;
         if (newFacing === 'user') {
           localVideo.style.transform = 'scaleX(-1)';
@@ -479,8 +579,8 @@
           const candStr = event.candidate.candidate;
           const candType = getCandidateType(candStr);
 
-          if (iceMode === 'GATEWAY' && candType !== 'host') {
-            log('local candidate SKIP (GATEWAY, type=' + candType + '): ' + candStr);
+          if ((iceMode === 'GATEWAY' || iceMode === 'WIFI_DIRECT') && candType !== 'host') {
+            log('local candidate SKIP (' + iceMode + ', type=' + candType + '): ' + candStr);
             return;
           }
 
@@ -504,18 +604,32 @@
             + ' code=' + e.errorCode + ' text=' + e.errorText);
       };
 
+      // ★ ИЗМЕНЕНО (4.5): watchdog на disconnected
       peerConnection.onconnectionstatechange = () => {
         const state = peerConnection.connectionState;
         setStatus('Состояние: ' + state);
         log('connectionState=' + state);
 
         if (state === 'failed') {
+          clearDisconnectWatchdog();
           attemptIceRestart();
         } else if (state === 'connected' || state === 'completed') {
+          clearDisconnectWatchdog();
           resetIceRestartState();
+          remoteStallNotified = false;
           startStatsMonitor();
-        } else if (state === 'disconnected' || state === 'closed') {
-          log('connectionState=' + state + ': монитор продолжает работу');
+        } else if (state === 'disconnected') {
+          clearDisconnectWatchdog();
+          disconnectWatchdog = setTimeout(() => {
+            if (peerConnection &&
+                (peerConnection.connectionState === 'disconnected' ||
+                 peerConnection.connectionState === 'failed')) {
+              log('disconnectWatchdog: 5с без связи → ICE restart');
+              attemptIceRestart();
+            }
+          }, 5000);
+        } else if (state === 'closed') {
+          clearDisconnectWatchdog();
         }
       };
 
@@ -542,6 +656,13 @@
       peerConnection.onsignalingstatechange = () => {
         log('signalingState=' + peerConnection.signalingState);
       };
+    }
+
+    function clearDisconnectWatchdog() {
+      if (disconnectWatchdog) {
+        clearTimeout(disconnectWatchdog);
+        disconnectWatchdog = null;
+      }
     }
 
     // ================ Мониторинг getStats ================
@@ -662,6 +783,9 @@
 
         log(summary);
 
+        // ★ НОВОЕ (4.8): детектор «видео собеседника замерло»
+        checkRemoteVideoStall(rxVideoPkts);
+
         allSucceededPairs.forEach((p, idx) => {
           const lc = candidates[p.localCandidateId];
           const rc = candidates[p.remoteCandidateId];
@@ -684,6 +808,22 @@
       } catch (e) {
         log('getStats error: ' + e.message);
       }
+    }
+
+    function checkRemoteVideoStall(rxVideoPkts) {
+      if (!peerConnection || peerConnection.connectionState !== 'connected') return;
+      if (rxVideoPkts === lastRxVideoPkts && rxVideoPkts > 0) {
+        rxVideoStallSamples++;
+        if (rxVideoStallSamples >= 3 && !remoteStallNotified) {
+          remoteStallNotified = true;
+          log('remote video STALLED: ' + rxVideoPkts + ' pkt не меняется');
+          window.android?.onRemoteVideoStalled?.();
+        }
+      } else {
+        rxVideoStallSamples = 0;
+        remoteStallNotified = false;
+      }
+      lastRxVideoPkts = rxVideoPkts;
     }
 
     // ================ ICE Restart ================
@@ -725,10 +865,16 @@
 
       setTimeout(async () => {
         try {
-          if (typeof peerConnection.restartIce === 'function') {
-            peerConnection.restartIce();
-          }
+          // ★ НЕ вызываем restartIce() отдельно — createOffer({iceRestart:true})
+          // сам сгенерирует новый ufrag и отправит его. Двойной вызов
+          // (restartIce + createOffer) ломал signalingState.
           if (!isIncomingMode) {
+            if (peerConnection.signalingState !== 'stable') {
+              log('ICE-RESTART: signalingState=' + peerConnection.signalingState
+                  + ' — пропускаем createOffer');
+              iceRestartInProgress = false;
+              return;
+            }
             const offer = await peerConnection.createOffer({ iceRestart: true });
             await peerConnection.setLocalDescription(offer);
             window.android?.sendSignal(
@@ -791,6 +937,8 @@
       }
     };
 
+    // ★ ИЗМЕНЕНО (4.6 + рекомендация): merged-условие дедупликации +
+    // lastOfferSdp обновляется ПОСЛЕ успешного setRemoteDescription
     async function processOffer(jsonStr) {
       if (!peerConnection) {
         log('processOffer: PC всё ещё null — некорректный вызов');
@@ -801,13 +949,30 @@
         const msg = JSON.parse(jsonStr);
         const sdp = JSON.parse(msg.payload.sdp);
 
+        // ★ Игнорируем stale-replay ТОЛЬКО на живом PC.
+        // При failed/closed — обрабатываем повторно (реконнект).
+        if (lastOfferSdp === sdp.sdp
+            && peerConnection.signalingState === 'stable'
+            && peerConnection.connectionState !== 'failed'
+            && peerConnection.connectionState !== 'closed') {
+          log('processOffer: дубликат offer на живом PC — игнор');
+          return;
+        }
+        pendingCandidates = [];
+
         await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
         remoteDescriptionSet = true;
+        // ★ ИЗМЕНЕНО (рекомендация): lastOfferSdp обновляем ПОСЛЕ
+        // успешного setRemoteDescription. Если set упадёт — lastOfferSdp
+        // не обновится, следующий тот же offer будет обработан заново.
+        lastOfferSdp = sdp.sdp;
         log('setRemoteDescription(offer) OK');
         flushPendingCandidates();
 
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
+        // ★ ИЗМЕНЕНО (рекомендация): lastAnswerSdp — после setLocalDescription
+        lastAnswerSdp = peerConnection.localDescription.sdp;
         log('createAnswer + setLocalDescription OK');
 
         window.android?.sendSignal(
@@ -823,26 +988,41 @@
       }
     }
 
+    // ★ ИЗМЕНЕНО (4.7 + рекомендация): guard signalingState + дедуп по
+    // lastAnswerSdp, обновление lastAnswerSdp ПОСЛЕ setRemoteDescription
     window.onRemoteAnswer = async function(jsonStr) {
-      try {
-        log('onRemoteAnswer: получен');
-        if (!peerConnection) {
-          log('onRemoteAnswer: PC null');
-          return;
-        }
-        const msg = JSON.parse(jsonStr);
-        const sdp = JSON.parse(msg.payload.sdp);
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-        remoteDescriptionSet = true;
-        log('setRemoteDescription(answer) OK');
-        flushPendingCandidates();
-        setStatus('Соединение установлено');
-        resetIceRestartState();
-      } catch (e) {
-        log('onRemoteAnswer error: ' + e.message);
-        window.android?.onCallError('Ошибка обработки answer: ' + e.message);
-      }
-    };
+  try {
+    log('onRemoteAnswer: получен');
+    if (!peerConnection) {
+      log('onRemoteAnswer: PC null');
+      return;
+    }
+    // ★ Guard signalingState — ДО JSON.parse, ДО setRemoteDescription
+    if (peerConnection.signalingState !== 'have-local-offer') {
+      log('onRemoteAnswer: signalingState=' + peerConnection.signalingState + ' — игнор');
+      return;
+    }
+    const msg = JSON.parse(jsonStr);
+    const sdp = JSON.parse(msg.payload.sdp);
+    if (lastAnswerSdp === sdp.sdp) {
+      log('onRemoteAnswer: дубликат — игнор');
+      return;
+    }
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+    remoteDescriptionSet = true;
+    lastAnswerSdp = sdp.sdp;
+    log('setRemoteDescription(answer) OK');
+    flushPendingCandidates();
+    setStatus('Соединение установлено');
+    resetIceRestartState();
+  } catch (e) {
+    log('onRemoteAnswer error: ' + e.message);
+    // ★ НЕ вызываем onCallError для "wrong state: stable" — это не фатально
+    if (e.message && e.message.indexOf('wrong state') === -1) {
+      window.android?.onCallError('Ошибка обработки answer: ' + e.message);
+    }
+  }
+};
 
     window.onRemoteCandidate = async function(jsonStr) {
       try {
@@ -911,15 +1091,17 @@
       }
     };
 
+    // ★ ИЗМЕНЕНО (4.9): clearDisconnectWatchdog + stopStatsMonitor
     document.getElementById('endCall').onclick = () => {
       stopStatsMonitor();
+      clearDisconnectWatchdog();
       try { peerConnection?.close(); } catch (e) {}
       window.android?.onCallEnded();
     };
 
     // ================ Fallback ================
 
-    log('call.html загружен (build with stats v2, iceMode support, camera switch v3)');
+    log('call.html загружен (build with watchers v2, merged-offer-dedup-after-set, disconnect-watchdog, iceServers-cleanup, atomic-sdp-snapshot)');
   </script>
 </body>
 </html>
