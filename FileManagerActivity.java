@@ -68,6 +68,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import com.my.mealse.filemanager.util.ZipCompressor;
+
 /**
  * Файловый менеджер Mealse.
  *
@@ -2445,6 +2447,15 @@ public class FileManagerActivity extends BaseActivity {
         boolean isRemote = currentSource != null && currentSource.isRemote();
         download.setVisible(isRemote);
       }
+
+      // ★ НОВОЕ: «Сжатие» — только для локальных источников.
+      // Для удалённых узлов сжатие требовало бы серверной поддержки
+      // (RemoteFsService должен уметь стримить ZIP), сейчас не реализовано.
+      MenuItem compress = menu.findItem(R.id.fm_multi_compress);
+      if (compress != null) {
+        boolean isLocal = currentSource != null && currentSource.isLocal();
+        compress.setVisible(isLocal);
+      }
       return true;
     }
 
@@ -2504,11 +2515,94 @@ public class FileManagerActivity extends BaseActivity {
         mode.finish();
         return true;
       }
+      // ★ НОВОЕ: сжатие выбранных файлов/папок в .zip.
+      if (id == R.id.fm_multi_compress) {
+        askCompressSelected();
+        return true;
+      }
       if (id == R.id.fm_multi_delete) {
         askMultiDelete();
         return true;
       }
       return false;
+    }
+
+    /**
+     * ★ НОВОЕ: сжатие выбранных файлов/папок в отдельные .zip.
+     *
+     * Логика: 1. Проверка: только локальный источник (для удалённых — не поддерживается). 2. Собираем выбранные LocalFileEntry → File. 3. outDir = currentLocalDir (текущая папка). 4. Вызываем ZipCompressor.showNameDialogAndCompress(...) — диалог редактирования имён + фоновое сжатие с прогрессом/отменой. 5. По завершении — закрываем ActionMode и перезагружаем список.
+     *
+     * Прогресс-диалог/toast/runOnUiThread переиспользуются через Ui-адаптер на существующих методах FileManagerActivity — без дублирования.
+     */
+    private void askCompressSelected() {
+      if (!isUiAlive())
+        return;
+      if (currentSource == null || !currentSource.isLocal()) {
+        toast("Сжатие доступно только для локальных файлов");
+        return;
+      }
+      List<FileEntry> selected = listAdapter.getSelectedEntries();
+      if (selected.isEmpty()) {
+        toast("Не выбрано");
+        return;
+      }
+
+      List<File> files = new ArrayList<>();
+      for (FileEntry e : selected) {
+        if (e instanceof LocalFileEntry) {
+          files.add(((LocalFileEntry) e).getFile());
+        }
+      }
+      if (files.isEmpty()) {
+        toast("Нет локальных файлов для сжатия");
+        return;
+      }
+
+      File outDir = currentLocalDir;
+      if (outDir == null || !outDir.isDirectory()) {
+        toast("Папка недоступна");
+        return;
+      }
+
+      // ★ Адаптер переиспользует существующие прогресс-диалог/toast/runOnUiThread
+      // FileManagerActivity. Никаких новых полей/диалогов не создаём.
+      ZipCompressor.Ui ui = new ZipCompressor.Ui() {
+        @Override
+        public boolean isAlive() {
+          return isUiAlive();
+        }
+
+        @Override
+        public void showProgress(String t, String m, Runnable c) {
+          showProgressDialog(t, m, c);
+        }
+
+        @Override
+        public void updateProgress(long d, long t) {
+          updateProgressDialog(d, t);
+        }
+
+        @Override
+        public void dismissProgress() {
+          dismissProgressDialog();
+        }
+
+        @Override
+        public void toast(String m) {
+          FileManagerActivity.this.toast(m);
+        }
+
+        @Override
+        public void runOnUi(Runnable r) {
+          runOnUiThread(r);
+        }
+      };
+
+      ZipCompressor.showNameDialogAndCompress(this, files, outDir, ui, log, () -> {
+        if (actionMode != null)
+          actionMode.finish();
+        reloadCurrent();
+      });
     }
 
     @Override

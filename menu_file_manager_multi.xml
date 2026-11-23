@@ -32,6 +32,16 @@
         android:icon="@drawable/ic_paste"
         app:showAsAction="ifRoom" />
 
+    <!-- ★ НОВОЕ: сжатие выбранных файлов/папок в .zip.
+         Видимость управляется в MultiActionMode.onPrepareActionMode —
+         только для локального источника (для удалённых узлов
+         сжатие требовало бы серверной поддержки). -->
+    <item
+        android:id="@+id/fm_multi_compress"
+        android:title="Сжатие"
+        android:icon="@drawable/ic_file_archive"
+        app:showAsAction="ifRoom" />
+
     <item
         android:id="@+id/fm_multi_delete"
         android:title="Удалить"
