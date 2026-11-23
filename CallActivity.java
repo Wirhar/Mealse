@@ -19,33 +19,8 @@ import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.EditorInfo;
-import android.webkit.JavascriptInterface;
-import android.webkit.PermissionRequest;
-import android.webkit.WebChromeClient;
-import android.webkit.WebResourceError;
-import android.webkit.WebResourceRequest;
-import android.webkit.WebSettings;
-import android.webkit.WebView;
-import android.webkit.WebViewClient;
-import android.widget.EditText;
-import android.widget.ImageButton;
-import android.widget.ListView;
-import android.widget.TextView;
-import android.widget.Toast;
-
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
-
+import android.webkit.*;
+import android.widget.*;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.my.mealse.messenger.MessengerEvents;
@@ -56,20 +31,23 @@ import com.my.mealse.messenger.model.ParticipantRole;
 import com.my.mealse.messenger.repo.ConversationRepository;
 import com.my.mealse.messenger.repo.MessageRepository;
 import com.my.mealse.messenger.repo.ParticipantRepository;
-import com.my.mealse.messenger.storage.AttachmentStorage;
 import com.my.mealse.messenger.transport.MessageCommands;
 import com.my.mealse.messenger.ui.MessageAdapter;
 import com.my.mealse.model.TrustedNode;
 import com.my.mealse.service.ConnectionManager;
-import com.my.mealse.util.BroadcastUtils;
-import com.my.mealse.util.CallStateManager;
-import com.my.mealse.util.DeviceInfoHelper;
-import com.my.mealse.util.IceConfigManager;
-import com.my.mealse.util.MealseLogger;
-import com.my.mealse.util.NodeManager;
-import com.my.mealse.util.SecureAuthManager;
-import com.my.mealse.util.WifiDirectManager;
+import com.my.mealse.util.*;
 import com.my.mealse.util.WifiDirectManager.Peer;
+import java.io.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 /**
  * CallActivity — экран звонка (WebRTC внутри WebView) + оверлей чата.
@@ -185,23 +163,14 @@ public class CallActivity extends Activity {
   }
 
   /** Ленивая инициализация static-логгера. */
+  /**
+   * ★ ИЗМЕНЕНО (п.18): всегда через MealseLogger.get(sAppCtx, TAG) — он сам кеширует в instances. Убран двойной кеш sLog: после MealseLogger.resetAll() (в MealseApp.onCreate) instances.clear(), но sLog не сбрасывался → slog() возвращал старый logger с закрытым writer. Теперь кеш только в MealseLogger.
+   */
   private static MealseLogger slog() {
-    if (sLog == null && sAppCtx != null) {
-      sLog = MealseLogger.get(sAppCtx, TAG);
-    }
-    return sLog;
+    if (sAppCtx == null)
+      return null;
+    return MealseLogger.get(sAppCtx, TAG);
   }
-
-  private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
-  private final Runnable heartbeatRunnable = new Runnable() {
-    @Override
-    public void run() {
-      if (callStateManager != null && !sCallEnded) {
-        callStateManager.heartbeat();
-        heartbeatHandler.postDelayed(this, 5_000);
-      }
-    }
-  };
 
   // ============================================================================
   // Поля UI/чата (instance, живут вместе с Activity)
@@ -263,8 +232,6 @@ public class CallActivity extends Activity {
   // Менеджеры (instance — нужны только Activity; в static-части используются через sAppCtx)
   private MealseLogger log;
   private SecureAuthManager secureAuthManager;
-  private CallStateManager callStateManager;
-  private IceConfigManager iceConfigManager;
   private NodeManager nodeManager;
 
   /** targetNodeId — id узла из NodeManager (нужен чату и participants). */
@@ -307,6 +274,25 @@ public class CallActivity extends Activity {
     }
   }
 
+  // ===== P3: static heartbeat — не держит Activity, один цикл на процесс =====
+
+  private static CallStateManager sCallStateManager;
+
+  // ===== P1: gate инициализации JS и старта FGS по runtime-разрешениям =====
+  /** setIncomingMode/offer отправлены в JS только после grant CAMERA+RECORD_AUDIO. */
+  private static volatile boolean sJsInitSent = false;
+  /** CallService реально стартовал (чтобы не дёргать stop до старта). */
+  private static volatile boolean sCallServiceStarted = false;
+
+  /**
+   * ★ НОВОЕ (P0, BUG-CA6): OnBackInvokedCallback для API 33+.
+   *
+   * На API 33+ при enableOnBackInvokedCallback="true" (в манифесте) система НЕ вызывает onBackPressed() — дефолтный back-callback просто finish'ит Activity, минуя endCallByUser() → bye не уходит, retained-движок + CallService продолжают жить (зомби-звонок).
+   *
+   * Регистрируется в onCreate ДО развилки reuse/new (иначе в reuse-ветке callback не зарегистрируется — там ранний return). Снимается в onDestroy.
+   */
+  private android.window.OnBackInvokedCallback backInvokedCallback;
+
   // ============================================================================
   // onCreate — две ветки (reuse / new)
   // ============================================================================
@@ -323,53 +309,61 @@ public class CallActivity extends Activity {
     try {
       setContentView(R.layout.activity_call);
 
+      // ★ НОВОЕ (P0, BUG-CA6): регистрируем OnBackInvokedCallback ДО
+      // развилки reuse/new. В reuse-ветке ниже стоит ранний return —
+      // если регистрировать после неё, callback не зарегистрируется при
+      // пересоздании Activity, и back снова сломается.
+      if (Build.VERSION.SDK_INT >= 33) {
+        try {
+          backInvokedCallback = () -> {
+            if (!isFinishing() && !isDestroyed()) {
+              onBackPressed();
+            }
+          };
+          getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+              android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backInvokedCallback);
+          log.log("onCreate: OnBackInvokedCallback зарегистрирован (API 33+)");
+        } catch (Throwable t) {
+          log.warn("onCreate: registerOnBackInvokedCallback: " + t.getMessage());
+        }
+      }
+
       Intent intent = getIntent();
       String requestedCallId = savedInstanceState != null
           ? savedInstanceState.getString(STATE_CALL_ID)
           : intent.getStringExtra(EXTRA_CALL_ID);
 
-      // ----------------------------------------------------------------------
-      // ВЕТКА 1: движок жив, тот же callId → просто reattach UI
-      // ----------------------------------------------------------------------
+      // ------------------------------------------------------------------
+      // ВЕТКА 1: движок жив, тот же callId → reattach UI
+      // ------------------------------------------------------------------
       synchronized (ENGINE_LOCK) {
         if (sWebView != null && !sCallEnded && sCallId != null && sCallId.equals(requestedCallId)) {
           log.log("onCreate: REUSE движка, callId=" + shortId(sCallId));
 
           targetNodeId = intent.getStringExtra("target_node_id");
-
-          // Восстанавливаем instance-менеджеры, которые нужны UI
-          callStateManager = new CallStateManager(this);
-          iceConfigManager = new IceConfigManager(this);
+          sCallStateManager = new CallStateManager(this);
 
           attachRetainedWebView();
-
           checkFullScreenIntentPermission();
           requestPermissions();
-
-          // ★ Переподписка на сигналы — receiver мог быть снят при onDestroy
           registerSignalReceiver();
-          if (sIsWifiDirectMode) {
-            // НЕ подписываемся на wifiDirectListener — MealseApp.handleWifiDirectSignal
-            // уже broadcast'ит ACTION_SIGNAL для candidate/answer/bye, и
-            // sSignalReceiver ловит. Двойная подписка → двойной onRemoteAnswer → ошибка.
-            log.log(
-                "CallActivity: WD-режим, полагаемся на MealseApp broadcast (без wifiDirectListener)");
-          }
+
+          if (sIsWifiDirectMode)
+            subscribeWifiDirectListener();
 
           initChatViews();
           initCallConversation();
           subscribeChatReceiver();
 
-          // Отправить накопленные сигналы и сообщить JS, что вернулись
+          startCallServiceIfPermitted();
+
           flushPendingSignals();
           evaluateJs("onAppForegrounded()");
 
-          // CallService уже запущен — повторный start не нужен
           log.log("══ onCreate END (reuse) ══");
           return;
         }
 
-        // Другой звонок уже идёт — не даём создать второй
         if (sWebView != null && !sCallEnded && sCallId != null
             && !sCallId.equals(requestedCallId)) {
           Toast.makeText(this, "Уже идёт другой звонок", Toast.LENGTH_LONG).show();
@@ -378,9 +372,9 @@ public class CallActivity extends Activity {
         }
       }
 
-      // ----------------------------------------------------------------------
+      // ------------------------------------------------------------------
       // ВЕТКА 2: новый звонок
-      // ----------------------------------------------------------------------
+      // ------------------------------------------------------------------
       targetNodeId = intent.getStringExtra("target_node_id");
       sTargetIp = intent.getStringExtra("target_ip");
       sTargetPort = intent.getIntExtra("target_port", 8081);
@@ -400,14 +394,11 @@ public class CallActivity extends Activity {
       log.log("incoming_offer_json="
           + (sIncomingOfferJson != null ? sIncomingOfferJson.length() + " симв." : "null"));
 
-      // ★ После смерти процесса устаревший offer переигрывать НЕЛЬЗЯ —
-      // ждём свежий offer от вызывающего (его ICE-watchdog переотправит).
       if (savedInstanceState != null && sIsIncoming) {
         log.warn("onCreate: пересоздание после смерти процесса — stale offer сброшен");
         sIncomingOfferJson = null;
       }
 
-      // Валидация: incoming_offer_json должен быть type="offer"
       if (sIsIncoming && sIncomingOfferJson != null && !sIncomingOfferJson.isEmpty()) {
         try {
           JsonObject check = com.google.gson.JsonParser.parseString(sIncomingOfferJson)
@@ -475,7 +466,6 @@ public class CallActivity extends Activity {
         }
       }
 
-      // ===== targetIp обязателен =====
       if (sTargetIp == null || sTargetIp.isEmpty()) {
         Toast.makeText(this, "Не указан IP узла", Toast.LENGTH_LONG).show();
         finish();
@@ -499,7 +489,6 @@ public class CallActivity extends Activity {
       // ===== callId =====
       sCallId = requestedCallId != null ? requestedCallId : UUID.randomUUID().toString();
 
-      // ★ Сброс флагов ТОЛЬКО для нового звонка (защита от дубля bye)
       sCallEnded = false;
       sByeAlreadySent = false;
       sEndingByUser = false;
@@ -507,6 +496,8 @@ public class CallActivity extends Activity {
       sWebViewLoaded = false;
       sWebViewDestroyed = false;
       sEngineInitialized = false;
+      sJsInitSent = false;
+      sCallServiceStarted = false;
       synchronized (sPendingSignals) {
         sPendingSignals.clear();
       }
@@ -514,22 +505,20 @@ public class CallActivity extends Activity {
       log.log("callId=" + sCallId + ", isIncoming=" + sIsIncoming + ", mode=" + sTargetMode);
 
       // ===== Менеджеры =====
-      iceConfigManager = new IceConfigManager(this);
-      callStateManager = new CallStateManager(this);
-
-      if (callStateManager.isCallActive()) {
-        String active = callStateManager.getActiveCallId();
+      sCallStateManager = new CallStateManager(this);
+      if (sCallStateManager.isCallActive()) {
+        String active = sCallStateManager.getActiveCallId();
         if (active != null && !active.equals(sCallId)) {
           Toast.makeText(this, "Уже идёт другой звонок", Toast.LENGTH_LONG).show();
           finish();
           return;
         }
       }
-      callStateManager.setCallActive(sCallId, targetNodeId);
+      sCallStateManager.setCallActive(sCallId, targetNodeId);
 
       // ===== UI/движок =====
       checkFullScreenIntentPermission();
-      setupWebView(); // создаёт sWebView и attach'ит
+      setupWebView();
       registerSignalReceiver();
       if (sIsWifiDirectMode)
         subscribeWifiDirectListener();
@@ -539,10 +528,10 @@ public class CallActivity extends Activity {
       initCallConversation();
       subscribeChatReceiver();
 
-      // ★ CallService — foreground с camera|microphone. Без него камера
-      // отбирается в фоне, а на API 34+ — SecurityException, если тип
-      // не задекларирован в манифесте.
-      CallService.start(this, sCallId, resolvePeerName());
+      // P1: FGS camera|microphone стартует ЗДЕСЬ только если разрешения уже
+      // выданы; иначе — в onRequestPermissionsResult после grant. Без grant
+      // startForeground(type=camera|mic) на API 34+ кидает SecurityException.
+      startCallServiceIfPermitted();
 
       log.log("══ onCreate END (new) ══ — targetIp=" + sTargetIp + ":" + sTargetPort + ", callId="
           + shortId(sCallId) + ", isIncoming=" + sIsIncoming + ", isWifiDirectMode="
@@ -553,16 +542,14 @@ public class CallActivity extends Activity {
       Toast.makeText(this, "Ошибка запуска звонка: " + e.getMessage(), Toast.LENGTH_LONG).show();
       finish();
     }
-
-    log.log(
-        "onCreate: OnBackInvokedCallback регистрируется в BaseActivity (если extends BaseActivity)");
   }
 
   /** Имя собеседника для уведомления CallService. */
-  private String resolvePeerName() {
+  /** Имя собеседника для уведомления CallService (static — работает без Activity). */
+  private static String resolvePeerName() {
     try {
-      if (sTargetFingerprint != null && !sTargetFingerprint.isEmpty()) {
-        NodeManager nm = new NodeManager(this);
+      if (sTargetFingerprint != null && !sTargetFingerprint.isEmpty() && sAppCtx != null) {
+        NodeManager nm = new NodeManager(sAppCtx);
         TrustedNode n = nm.findByFingerprint(sTargetFingerprint);
         if (n != null && n.getName() != null && !n.getName().isEmpty())
           return n.getName();
@@ -570,6 +557,75 @@ public class CallActivity extends Activity {
     } catch (Exception ignored) {
     }
     return sTargetIp != null ? sTargetIp : "собеседник";
+  }
+
+  /** P1: выданы ли runtime-разрешения CAMERA + RECORD_AUDIO. */
+  private static boolean hasMediaPermissions() {
+    if (sAppCtx == null)
+      return false;
+    try {
+      return sAppCtx
+          .checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+          && sAppCtx.checkSelfPermission(
+              Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  /**
+   * P1: старт CallService ТОЛЬКО при выданных CAMERA+RECORD_AUDIO. Вызывается из onCreate (обе ветки), onResume и onRequestPermissionsResult. Идемпотентно: повторный start просто обновляет уведомление.
+   */
+  private static void startCallServiceIfPermitted() {
+    if (sCallEnded || sCallId == null || sAppCtx == null)
+      return;
+    if (!hasMediaPermissions()) {
+      MealseLogger l = slog();
+      if (l != null)
+        l.log("startCallServiceIfPermitted: разрешения не выданы — жду grant");
+      return;
+    }
+    try {
+      CallService.start(sAppCtx, sCallId, resolvePeerName());
+      sCallServiceStarted = true;
+      MealseLogger l = slog();
+      if (l != null)
+        l.log(
+            "startCallServiceIfPermitted: CallService.start OK, callId=" + shortIdStatic(sCallId));
+    } catch (Exception e) {
+      MealseLogger l = slog();
+      if (l != null)
+        l.logError("startCallServiceIfPermitted", e);
+    }
+  }
+
+  /**
+   * P1: отправляет setIncomingMode (+ сохранённый offer) в JS только после grant. До grant getUserMedia в call.html упал бы с NotAllowedError → onCallError → звонок завершился бы ещё до выдачи разрешений. Сигналы до grant буферизуются.
+   */
+  private static void onMediaPermissionsReady() {
+    if (sCallEnded || sWebView == null || sWebViewDestroyed || !sWebViewLoaded)
+      return;
+    if (sJsInitSent)
+      return;
+    if (!hasMediaPermissions()) {
+      MealseLogger l = slog();
+      if (l != null)
+        l.log("onMediaPermissionsReady: жду CAMERA/RECORD_AUDIO");
+      return;
+    }
+    sJsInitSent = true;
+    evaluateJs("setIncomingMode(" + sIsIncoming + ")");
+    MealseLogger l = slog();
+    if (l != null)
+      l.log("→ JS: setIncomingMode(" + sIsIncoming + ") [after grant]");
+
+    if (sIsIncoming && sIncomingOfferJson != null && !sIncomingOfferHandled) {
+      evaluateJs("onRemoteOffer('" + escapeForJsStatic(sIncomingOfferJson) + "')");
+      sIncomingOfferHandled = true;
+      if (l != null)
+        l.log("→ JS: onRemoteOffer (сохранённый) [after grant]");
+    }
+    flushPendingSignals();
   }
 
   // ============================================================================
@@ -634,159 +690,11 @@ public class CallActivity extends Activity {
       sWebView.addJavascriptInterface(new WebAppInterface(), "android");
       log.log("JS-интерфейс 'android' добавлен");
 
-      sWebView.setWebViewClient(new WebViewClient() {
-        @Override
-        public void onPageStarted(WebView view, String url, Bitmap favicon) {
-          super.onPageStarted(view, url, favicon);
-          log.log("🌐 onPageStarted: " + url);
-        }
-
-        @Override
-        public void onPageFinished(WebView view, String url) {
-          super.onPageFinished(view, url);
-          log.log("🌐 onPageFinished: " + url);
-          sWebViewLoaded = true;
-
-          if (sEngineInitialized) {
-            // Reuse: configureIce/mode уже сделаны в прошлой сессии
-            flushPendingSignals();
-            return;
-          }
-          sEngineInitialized = true;
-
-          try {
-            String iceJson = iceConfigManager.buildIceConfigJsonForMode(
-                sTargetMode != null ? sTargetMode.name() : "AUTO", sTargetGatewayIp,
-                sTargetGatewayPort);
-            evaluateJs("configureIce('" + escapeForJs(iceJson) + "')");
-            log.log("→ JS: configureIce(" + iceJson + ")");
-
-            String modeName = sTargetMode != null ? sTargetMode.name() : "AUTO";
-            evaluateJs("configureIceMode('" + modeName + "', '"
-                + (sTargetGatewayIp != null ? sTargetGatewayIp : "") + "', " + sTargetGatewayPort
-                + ")");
-            log.log("→ JS: configureIceMode(" + modeName + ")");
-
-            evaluateJs("setIncomingMode(" + sIsIncoming + ")");
-            log.log("→ JS: setIncomingMode(" + sIsIncoming + ")");
-
-            if (sIsIncoming && sIncomingOfferJson != null && !sIncomingOfferHandled) {
-              evaluateJs("onRemoteOffer('" + escapeForJs(sIncomingOfferJson) + "')");
-              sIncomingOfferHandled = true;
-              log.log("→ JS: onRemoteOffer (сохранённый)");
-            }
-
-            // flushPendingSignals через 400 мс — чтобы JS успел инициализироваться
-            sMainHandler.postDelayed(() -> flushPendingSignals(), 400);
-          } catch (Exception e) {
-            logError("Ошибка в onPageFinished", e);
-          }
-        }
-
-        @Override
-        public void onReceivedError(WebView view, WebResourceRequest request,
-            WebResourceError error) {
-          super.onReceivedError(view, request, error);
-          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            log.error("🌐 onReceivedError: " + error.getDescription() + " для " + request.getUrl());
-          }
-        }
-      });
-      log.log("WebViewClient установлен");
-
-      sWebView.setWebChromeClient(new WebChromeClient() {
-        /**
-         * ★ На application-контексте нет темы — grant только для локального asset, и только video/audio capture.
-         */
-        @Override
-        public void onPermissionRequest(final PermissionRequest request) {
-          sMainHandler.post(() -> {
-            try {
-              String origin = request.getOrigin() != null ? request.getOrigin().toString() : "";
-              log.log("onPermissionRequest: origin=" + origin + ", resources="
-                  + Arrays.toString(request.getResources()));
-
-              // ★ ИСПРАВЛЕНО: WebView на Android 15 / MIUI отдаёт "file:///"
-              // (без android_asset). Разрешаем:
-              // - пустой origin (некоторые WebView);
-              // - "file:///" (Xiaomi/Android 15);
-              // - "file:///android_asset..." (стандарт);
-              // - "null" (некоторые прошивки).
-              // Если origin непустой и не наш — deny.
-              boolean isOurAsset = origin.isEmpty() || origin.equals("null")
-                  || origin.equals("file:///") || origin.startsWith("file:///android_asset")
-                  || origin.startsWith("file://");
-              if (!isOurAsset) {
-                log.warn("onPermissionRequest: origin=" + origin + " — deny (не наш asset)");
-                request.deny();
-                return;
-              }
-
-              // ★ Фильтруем только video/audio capture
-              List<String> allowed = new ArrayList<>();
-              for (String r : request.getResources()) {
-                if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)
-                    || PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
-                  allowed.add(r);
-                }
-              }
-              if (allowed.isEmpty()) {
-                log.warn("onPermissionRequest: нет video/audio capture в resources — deny");
-                request.deny();
-                return;
-              }
-
-              request.grant(allowed.toArray(new String[0]));
-              log.log("onPermissionRequest: granted " + allowed + " (origin=" + origin + ")");
-            } catch (Exception e) {
-              logError("onPermissionRequest", e);
-              try {
-                request.deny();
-              } catch (Exception ignored) {
-              }
-            }
-          });
-        }
-
-        @Override
-        public boolean onConsoleMessage(android.webkit.ConsoleMessage cm) {
-          log.log("[console] " + cm.message() + " (" + cm.sourceId() + ":" + cm.lineNumber() + ")");
-          return true;
-        }
-
-        // ★ Диалоги JS — на application-контексте системные не покажутся
-        @Override
-        public boolean onJsAlert(WebView view, String url, String message,
-            final android.webkit.JsResult result) {
-          sMainHandler.post(() -> {
-            try {
-              new android.app.AlertDialog.Builder(CallActivity.this).setMessage(message)
-                  .setPositiveButton(android.R.string.ok, (d, w) -> result.confirm())
-                  .setCancelable(false).show();
-            } catch (Exception e) {
-              result.cancel();
-            }
-          });
-          return true;
-        }
-
-        @Override
-        public boolean onJsConfirm(WebView view, String url, String message,
-            final android.webkit.JsResult result) {
-          sMainHandler.post(() -> {
-            try {
-              new android.app.AlertDialog.Builder(CallActivity.this).setMessage(message)
-                  .setPositiveButton(android.R.string.ok, (d, w) -> result.confirm())
-                  .setNegativeButton(android.R.string.cancel, (d, w) -> result.cancel())
-                  .setCancelable(false).show();
-            } catch (Exception e) {
-              result.cancel();
-            }
-          });
-          return true;
-        }
-      });
-      log.log("WebChromeClient установлен");
+      // P3: static-клиенты не захватывают CallActivity.this → нет утечки Activity
+      sWebView.setWebViewClient(new EngineWebViewClient());
+      log.log("WebViewClient установлен (static)");
+      sWebView.setWebChromeClient(new EngineWebChromeClient());
+      log.log("WebChromeClient установлен (static)");
 
       attachRetainedWebView();
       sWebView.loadUrl("file:///android_asset/call.html");
@@ -887,11 +795,21 @@ public class CallActivity extends Activity {
     if (l != null)
       l.logSignal("RX", type, sCallId);
 
+    // WebView не готов → буфер вне Activity
     if (!sWebViewLoaded || sWebView == null || sWebViewDestroyed) {
       synchronized (sPendingSignals) {
-        if (sPendingSignals.size() < 256) {
+        if (sPendingSignals.size() < 256)
           sPendingSignals.add(new PendingSignal(type, json));
-        }
+      }
+      return;
+    }
+
+    // P1: до grant не шлём offer/answer/candidate в JS (getUserMedia упадёт).
+    // bye пропускаем сразу — завершение не должно ждать разрешений.
+    if (!hasMediaPermissions() && !"bye".equals(type)) {
+      synchronized (sPendingSignals) {
+        if (sPendingSignals.size() < 256)
+          sPendingSignals.add(new PendingSignal(type, json));
       }
       return;
     }
@@ -937,6 +855,10 @@ public class CallActivity extends Activity {
 
   /** Сливает sPendingSignals в JS (когда WebView готов). */
   private static void flushPendingSignals() {
+    // P1: пока разрешения не выданы — не сливаем (offer/answer/candidate ждут grant).
+    if (!hasMediaPermissions())
+      return;
+
     List<PendingSignal> copy;
     synchronized (sPendingSignals) {
       if (sPendingSignals.isEmpty())
@@ -1037,14 +959,23 @@ public class CallActivity extends Activity {
           });
         }
 
+        /**
+         * P4: ТОЛЬКО offer. candidate/answer/bye уже доставляются через MealseApp.handleWifiDirectSignal → broadcast(ACTION_SIGNAL) → sSignalReceiver. Раньше listener слал ВСЕ типы + MealseApp тоже broadcast'ил candidate/answer/bye → двойной onRemoteAnswer/candidate. offer MealseApp в активный звонок не broadcast'ит (водит в IncomingCallActivity/busy), поэтому его берём напрямую здесь.
+         */
         @Override
         public void onSignal(String json) {
           try {
+            JsonObject obj = new Gson().fromJson(json, JsonObject.class);
+            if (obj == null || !obj.has("type"))
+              return;
+            String type = obj.get("type").getAsString();
+            if (!"offer".equals(type))
+              return; // остальное — через broadcast
             handleIncomingSignal(json);
           } catch (Exception e) {
             MealseLogger l = slog();
             if (l != null)
-              l.logError("WD onSignal", e);
+              l.logError("WD onSignal (offer)", e);
           }
         }
 
@@ -1058,7 +989,7 @@ public class CallActivity extends Activity {
       sWifiDirectManager.addListener(sWdListener);
       MealseLogger l = slog();
       if (l != null)
-        l.log("subscribeWifiDirectListener: OK");
+        l.log("subscribeWifiDirectListener: OK (offer-only)");
     } catch (Exception e) {
       MealseLogger l = slog();
       if (l != null)
@@ -1156,11 +1087,11 @@ public class CallActivity extends Activity {
         sPendingSignals.clear();
       }
 
-      // ★ destroy() асинхронный — постим в main, не держим ENGINE_LOCK
       final WebView w = sWebView;
       sWebViewDestroyed = true;
       sWebViewLoaded = false;
       sEngineInitialized = false;
+      sJsInitSent = false;
       sWebView = null;
       sMainHandler.post(() -> {
         if (w != null) {
@@ -1175,19 +1106,23 @@ public class CallActivity extends Activity {
         }
       });
 
-      // clearCallActive — только здесь (не в onDestroy!)
       try {
-        new CallStateManager(sAppCtx).clearCallActive();
+        if (sCallStateManager != null)
+          sCallStateManager.clearCallActive();
+        else
+          new CallStateManager(sAppCtx).clearCallActive();
       } catch (Exception ignored) {
       }
 
-      // CallService.stop
-      try {
-        CallService.stop(sAppCtx);
-      } catch (Exception ignored) {
+      // P1: останавливаем сервис только если он реально стартовал
+      if (sCallServiceStarted) {
+        try {
+          CallService.stop(sAppCtx);
+        } catch (Exception ignored) {
+        }
+        sCallServiceStarted = false;
       }
 
-      // finish UI (если Activity ещё жива)
       final CallActivity ui = sUi;
       if (ui != null) {
         ui.runOnUiThread(() -> {
@@ -1198,7 +1133,6 @@ public class CallActivity extends Activity {
         });
       }
 
-      // Сброс параметров звонка (но НЕ sCallEnded/sByeAlreadySent/sEndingByUser)
       sCallId = null;
       sTargetIp = null;
       sTargetFingerprint = null;
@@ -1261,15 +1195,31 @@ public class CallActivity extends Activity {
     log.log("══ onResume START ══");
 
     if (!sCallEnded) {
-      heartbeatHandler.removeCallbacks(heartbeatRunnable);
-      heartbeatHandler.post(heartbeatRunnable);
+      // ★ P1 (п.8): self-heal FGS, если сервис был убит или разрешения
+      // выданы через Settings (а не через диалог).
+      startCallServiceIfPermitted();
+
+      // ★ P1 (п.8): onMediaPermissionsReady() идемпотентен (sJsInitSent).
+      // Если разрешения выданы через Settings — onPageFinished уже отработал
+      // без setIncomingMode; здесь повторяем попытку.
+      onMediaPermissionsReady();
+
+      // ★ P13 (страховка): пока сервис не стартовал, heartbeat не идёт,
+      // и isCallActive() мог автосброситься через 15 с. Обновляем timestamp,
+      // чтобы MealseApp при повторном offer не показал второй входящий.
+      if (sCallStateManager != null && sCallId != null) {
+        try {
+          sCallStateManager.setCallActive(sCallId, targetNodeId);
+        } catch (Exception ignored) {
+        }
+      }
+
       if (!sIsWifiDirectMode && !sReceiverRegistered)
         registerSignalReceiver();
       if (sIsWifiDirectMode && sWdListener == null)
         subscribeWifiDirectListener();
     }
 
-    // ★ JS-хук: вернуть камеру/микрофон, переподключить ICE если нужно
     evaluateJs("onAppForegrounded()");
     flushPendingSignals();
 
@@ -1300,6 +1250,17 @@ public class CallActivity extends Activity {
   @Override
   protected void onDestroy() {
     log.log("onDestroy START (callEnded=" + sCallEnded + ")");
+
+    // ★ P0 (п.19): снимаем OnBackInvokedCallback, чтобы уничтоженная
+    // Activity не получала back-события. Делаем ДО super.onDestroy().
+    if (Build.VERSION.SDK_INT >= 33 && backInvokedCallback != null) {
+      try {
+        getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback);
+        log.log("onDestroy: OnBackInvokedCallback снят");
+      } catch (Throwable ignored) {
+      }
+      backInvokedCallback = null;
+    }
 
     // Отписываемся только от чата (это instance-уровень)
     unsubscribeChatReceiver();
@@ -1412,7 +1373,6 @@ public class CallActivity extends Activity {
     if (requestCode != 100)
       return;
     try {
-      // ★ ФИКС: length >= 2, а не > 0 — иначе AIOOBE при отказе в первом
       boolean granted = grantResults.length >= 2
           && grantResults[0] == PackageManager.PERMISSION_GRANTED
           && grantResults[1] == PackageManager.PERMISSION_GRANTED;
@@ -1421,7 +1381,12 @@ public class CallActivity extends Activity {
       if (!granted) {
         Toast.makeText(this, "Для звонка нужны камера и микрофон", Toast.LENGTH_LONG).show();
         endCallInternal(true, "declined");
+        return;
       }
+
+      // P1: разрешения получены — теперь можно и FGS camera|mic, и JS-инициализацию.
+      startCallServiceIfPermitted();
+      onMediaPermissionsReady();
     } catch (Exception e) {
       logError("onRequestPermissionsResult", e);
     }
@@ -1990,13 +1955,7 @@ public class CallActivity extends Activity {
       return "?";
     return id.length() > 8 ? id.substring(0, 8) : id;
   }
-
-  private String escapeForJs(String json) {
-    if (json == null)
-      return "";
-    return json.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r");
-  }
-
+  
   private String shortId(String id) {
     return shortIdStatic(id);
   }
@@ -2035,4 +1994,169 @@ public class CallActivity extends Activity {
       return "file";
     return s.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
   }
+
+  /** P3: static — не держит ссылку на Activity, переживает её уничтожение. */
+  private static class EngineWebViewClient extends WebViewClient {
+
+    @Override
+    public void onPageStarted(WebView view, String url, Bitmap favicon) {
+      super.onPageStarted(view, url, favicon);
+      MealseLogger l = slog();
+      if (l != null)
+        l.log("🌐 onPageStarted: " + url);
+    }
+
+    @Override
+    public void onPageFinished(WebView view, String url) {
+      super.onPageFinished(view, url);
+      MealseLogger l = slog();
+      if (l != null)
+        l.log("🌐 onPageFinished: " + url);
+      sWebViewLoaded = true;
+
+      if (sEngineInitialized) {
+        flushPendingSignals();
+        return;
+      }
+      sEngineInitialized = true;
+
+      try {
+        IceConfigManager icm = new IceConfigManager(sAppCtx);
+        String iceJson = icm.buildIceConfigJsonForMode(
+            sTargetMode != null ? sTargetMode.name() : "AUTO", sTargetGatewayIp,
+            sTargetGatewayPort);
+        evaluateJs("configureIce('" + escapeForJsStatic(iceJson) + "')");
+        if (l != null)
+          l.log("→ JS: configureIce(" + iceJson + ")");
+
+        String modeName = sTargetMode != null ? sTargetMode.name() : "AUTO";
+        evaluateJs("configureIceMode('" + modeName + "', '"
+            + (sTargetGatewayIp != null ? sTargetGatewayIp : "") + "', " + sTargetGatewayPort
+            + ")");
+        if (l != null)
+          l.log("→ JS: configureIceMode(" + modeName + ")");
+
+        // P1: setIncomingMode + offer — только после grant CAMERA/RECORD_AUDIO.
+        onMediaPermissionsReady();
+
+        sMainHandler.postDelayed(() -> flushPendingSignals(), 400);
+      } catch (Exception e) {
+        MealseLogger lg = slog();
+        if (lg != null)
+          lg.logError("Ошибка в onPageFinished", e);
+      }
+    }
+
+    @Override
+    public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+      super.onReceivedError(view, request, error);
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        MealseLogger l = slog();
+        if (l != null)
+          l.error("🌐 onReceivedError: " + error.getDescription() + " для " + request.getUrl());
+      }
+    }
+  }
+
+  /** P3: static — диалоги JS строим на живом sUi, иначе cancel (без утечки/краша). */
+  private static class EngineWebChromeClient extends WebChromeClient {
+
+    @Override
+    public void onPermissionRequest(final PermissionRequest request) {
+      sMainHandler.post(() -> {
+        MealseLogger l = slog();
+        try {
+          String origin = request.getOrigin() != null ? request.getOrigin().toString() : "";
+          if (l != null)
+            l.log("onPermissionRequest: origin=" + origin + ", resources="
+                + Arrays.toString(request.getResources()));
+
+          boolean isOurAsset = origin.isEmpty() || origin.equals("null")
+              || origin.equals("file:///") || origin.startsWith("file:///android_asset")
+              || origin.startsWith("file://");
+          if (!isOurAsset) {
+            if (l != null)
+              l.warn("onPermissionRequest: origin=" + origin + " — deny (не наш asset)");
+            request.deny();
+            return;
+          }
+
+          List<String> allowed = new ArrayList<>();
+          for (String r : request.getResources()) {
+            if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)
+                || PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(r)) {
+              allowed.add(r);
+            }
+          }
+          if (allowed.isEmpty()) {
+            if (l != null)
+              l.warn("onPermissionRequest: нет video/audio capture — deny");
+            request.deny();
+            return;
+          }
+
+          request.grant(allowed.toArray(new String[0]));
+          if (l != null)
+            l.log("onPermissionRequest: granted " + allowed + " (origin=" + origin + ")");
+        } catch (Exception e) {
+          if (l != null)
+            l.logError("onPermissionRequest", e);
+          try {
+            request.deny();
+          } catch (Exception ignored) {
+          }
+        }
+      });
+    }
+
+    @Override
+    public boolean onConsoleMessage(android.webkit.ConsoleMessage cm) {
+      MealseLogger l = slog();
+      if (l != null)
+        l.log("[console] " + cm.message() + " (" + cm.sourceId() + ":" + cm.lineNumber() + ")");
+      return true;
+    }
+
+    @Override
+    public boolean onJsAlert(WebView view, String url, String message,
+        final android.webkit.JsResult result) {
+      sMainHandler.post(() -> {
+        CallActivity ui = sUi;
+        if (ui == null || ui.isFinishing() || ui.isDestroyed()) {
+          result.cancel(); // UI мёртв — диалог не показать, не падаем
+          return;
+        }
+        try {
+          new android.app.AlertDialog.Builder(ui).setMessage(message)
+              .setPositiveButton(android.R.string.ok, (d, w) -> result.confirm())
+              .setCancelable(false).show();
+        } catch (Exception e) {
+          result.cancel();
+        }
+      });
+      return true;
+    }
+
+    @Override
+    public boolean onJsConfirm(WebView view, String url, String message,
+        final android.webkit.JsResult result) {
+      sMainHandler.post(() -> {
+        CallActivity ui = sUi;
+        if (ui == null || ui.isFinishing() || ui.isDestroyed()) {
+          result.cancel();
+          return;
+        }
+        try {
+          new android.app.AlertDialog.Builder(ui).setMessage(message)
+              .setPositiveButton(android.R.string.ok, (d, w) -> result.confirm())
+              .setNegativeButton(android.R.string.cancel, (d, w) -> result.cancel())
+              .setCancelable(false).show();
+        } catch (Exception e) {
+          result.cancel();
+        }
+      });
+      return true;
+    }
+  }
+
 }

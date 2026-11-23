@@ -16,11 +16,9 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
 
-import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
-import com.my.mealse.service.ConnectionManager;
-import com.my.mealse.service.ServerService;
+import com.my.mealse.util.CallStateManager;
 import com.my.mealse.util.MealseLogger;
 
 /**
@@ -36,14 +34,17 @@ import com.my.mealse.util.MealseLogger;
  *     жив, а retained-WebView (статический движок в CallActivity)
  *     продолжает держать PeerConnection.
  *  3. Постоянное уведомление «Звонок активен — вернуться» с
- *     PendingIntent на CallActivity: после системного убийства
- *     активити пользователь видит, что звонок идёт, и может вернуться.
+ *     PendingIntent на CallActivity.
+ *
+ * ★ P3: heartbeat живёт ЗДЕСЬ (а не в CallActivity). Сервис существует
+ *   ровно столько, сколько звонок → heartbeat не держит Activity и не
+ *   дублируется при пересозданиях экрана. Раз в 5 с обновляет
+ *   CallStateManager, чтобы isCallActive() не сбрасывался по таймауту.
+ *
+ * ★ P6: остановка через stopService() (не startService из фона).
  *
  * Сервис НЕ держит WebView — это делает статический retained-движок
- * в CallActivity (sWebView). Сервис только:
- *  - поднимает foreground-статус с типом camera|microphone;
- *  - показывает/обновляет уведомление;
- *  - останавливается по команде ACTION_STOP (из endCallInternal).
+ * в CallActivity (sWebView).
  */
 public class CallService extends Service {
 
@@ -54,25 +55,41 @@ public class CallService extends Service {
   public static final String ACTION_STOP  = "com.my.mealse.call.STOP";
 
   // ===== Extras =====
-  public static final String EXTRA_CALL_ID     = "call_id";
-  public static final String EXTRA_PEER_NAME   = "peer_name";
+  public static final String EXTRA_CALL_ID   = "call_id";
+  public static final String EXTRA_PEER_NAME = "peer_name";
 
   // ===== Notification =====
   private static final String CHANNEL_ID = "MealseActiveCallChannel";
   private static final int NOTIF_ID = 105;
 
+  // ===== P3: heartbeat =====
+  private static final long HEARTBEAT_INTERVAL_MS = 5_000L;
+
   private MealseLogger log;
-  private final Handler mainHandler = new Handler(Looper.getMainLooper());
+  private CallStateManager callStateManager;
+
+  private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
+  private volatile boolean heartbeatRunning = false;
 
   private volatile boolean foregroundStarted = false;
   private String currentCallId;
   private String currentPeerName;
 
-  /**
-   * ★ Приёмник команды STOP из endCallInternal (через startService/stopService
-   * или прямой sendBroadcast — на выбор вызывающего). Также ловит
-   * ACTION_STOP из уведомления (кнопка «Завершить»).
-   */
+  /** P3: цикл heartbeat. Не держит Activity; останавливается со смертью сервиса. */
+  private final Runnable heartbeatRunnable = new Runnable() {
+    @Override
+    public void run() {
+      if (!heartbeatRunning) return;
+      try {
+        if (callStateManager != null) callStateManager.heartbeat();
+      } catch (Exception e) {
+        log("heartbeat error: " + e.getMessage());
+      }
+      heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
+    }
+  };
+
+  /** Приёмник команды STOP (альтернативный путь; основной — stopService). */
   private final BroadcastReceiver stopReceiver = new BroadcastReceiver() {
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -95,7 +112,7 @@ public class CallService extends Service {
     log = MealseLogger.get(this, TAG);
     log.log("══ onCreate START ══");
 
-    // ★ startForeground() ПЕРВЫМ делом — иначе на Android 12+
+    // startForeground() ПЕРВЫМ делом — иначе на Android 12+
     // ForegroundServiceDidNotStartInTimeException.
     try {
       createNotificationChannel();
@@ -104,7 +121,10 @@ public class CallService extends Service {
       Log.e(TAG, "Ошибка startForeground в onCreate", e);
     }
 
+    callStateManager = new CallStateManager(this);
     registerStopReceiver();
+    startHeartbeat();   // P3
+
     log.log("══ onCreate END ══");
   }
 
@@ -112,7 +132,7 @@ public class CallService extends Service {
   public int onStartCommand(Intent intent, int flags, int startId) {
     log("══ onStartCommand START ══");
 
-    // ★ Повторный startForeground — безопасно (обновляет уведомление).
+    // Повторный startForeground безопасен (обновляет уведомление).
     try {
       createNotificationChannel();
       startForegroundWithType(buildNotification("Звонок активен"));
@@ -121,6 +141,12 @@ public class CallService extends Service {
     }
 
     if (intent == null) {
+      // Zombie-рестарт после смерти процесса без callId — не воскрешаем.
+      if (currentCallId == null) {
+        log("intent == null и callId неизвестен — останавливаюсь");
+        stopSelfSafely();
+        return START_NOT_STICKY;
+      }
       log("intent == null — сервис жив, жду STOP");
       return START_STICKY;
     }
@@ -138,10 +164,9 @@ public class CallService extends Service {
       currentCallId = intent.getStringExtra(EXTRA_CALL_ID);
       currentPeerName = intent.getStringExtra(EXTRA_PEER_NAME);
 
-      log("Звонок: callId=" + shortId(currentCallId)
-          + ", peer=" + currentPeerName);
+      log("Звонок: callId=" + shortId(currentCallId) + ", peer=" + currentPeerName);
 
-      // Обновляем уведомление с именем собеседника
+      ensureCallActive();   // P3: (ре)активируем флаг после grant/долгого ожидания
       updateNotification();
     } else {
       log("Неизвестный action — сервис жив, жду STOP");
@@ -153,6 +178,7 @@ public class CallService extends Service {
   @Override
   public void onDestroy() {
     log("onDestroy START");
+    stopHeartbeat();          // P3
     unregisterStopReceiver();
     try {
       stopForegroundCompat();
@@ -167,15 +193,42 @@ public class CallService extends Service {
   }
 
   // ============================================================
+  // P3: heartbeat
+  // ============================================================
+
+  private void startHeartbeat() {
+    heartbeatHandler.removeCallbacks(heartbeatRunnable);
+    heartbeatRunning = true;
+    heartbeatHandler.post(heartbeatRunnable);
+    log("startHeartbeat: интервал=" + HEARTBEAT_INTERVAL_MS + "мс");
+  }
+
+  private void stopHeartbeat() {
+    heartbeatRunning = false;
+    heartbeatHandler.removeCallbacks(heartbeatRunnable);
+  }
+
+  /**
+   * Если флаг call_active успел сброситься (например, пользователь долго
+   * выдавал разрешения и heartbeat ещё не шёл) — переустанавливаем его.
+   * targetNodeId сохраняем, чтобы не потерять данные узла.
+   */
+  private void ensureCallActive() {
+    try {
+      if (callStateManager == null) callStateManager = new CallStateManager(this);
+      if (currentCallId != null && !callStateManager.isCallActive()) {
+        callStateManager.setCallActive(currentCallId, callStateManager.getActiveTargetNode());
+        log("ensureCallActive: флаг переустановлен для " + shortId(currentCallId));
+      }
+    } catch (Exception e) {
+      log("ensureCallActive error: " + e.getMessage());
+    }
+  }
+
+  // ============================================================
   // startForeground с типом camera|microphone
   // ============================================================
 
-  /**
-   * ★ На API 29+ передаём явный foregroundServiceType. На API 34+
-   * без декларации в манифесте и без разрешений
-   * FOREGROUND_SERVICE_CAMERA/MICROPHONE будет SecurityException —
-   * см. AndroidManifest.xml (раздел «Сервис звонка»).
-   */
   private void startForegroundWithType(Notification notif) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
       int type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
@@ -183,10 +236,12 @@ public class CallService extends Service {
       try {
         startForeground(NOTIF_ID, notif, type);
       } catch (Exception e) {
-        // Некоторые прошивки требуют type без битовой маски, если
-        // тип не задекларирован в манифесте. Падаем в fallback.
         Log.e(TAG, "startForeground(type) failed — fallback", e);
-        startForeground(NOTIF_ID, notif);
+        try {
+          startForeground(NOTIF_ID, notif);
+        } catch (Exception e2) {
+          Log.e(TAG, "startForeground fallback failed", e2);
+        }
       }
     } else {
       startForeground(NOTIF_ID, notif);
@@ -207,10 +262,11 @@ public class CallService extends Service {
 
   private void stopSelfSafely() {
     try {
+      stopHeartbeat();        // P3
       stopForegroundCompat();
       stopSelf();
     } catch (Exception e) {
-      log.logError("stopSelfSafely", e);
+      if (log != null) log.logError("stopSelfSafely", e);
     }
   }
 
@@ -223,7 +279,7 @@ public class CallService extends Service {
       NotificationChannel channel = new NotificationChannel(
           CHANNEL_ID,
           "Активный звонок Mealse",
-          NotificationManager.IMPORTANCE_LOW); // LOW — без звука, не мешает
+          NotificationManager.IMPORTANCE_LOW);
       channel.setDescription("Уведомление о текущем звонке Mealse");
       channel.setShowBadge(false);
       channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
@@ -233,9 +289,6 @@ public class CallService extends Service {
   }
 
   private Notification buildNotification(String text) {
-    // ★ PendingIntent на CallActivity — вернуться к звонку.
-    // Используем setClassName, чтобы не зависеть от compile-time импорта
-    // (CallActivity — в этом же пакете, но лишняя связка не нужна).
     Intent openIntent = new Intent();
     openIntent.setClassName(getPackageName(), "com.my.mealse.CallActivity");
     openIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
@@ -249,14 +302,12 @@ public class CallService extends Service {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
       piFlags |= PendingIntent.FLAG_IMMUTABLE;
     }
-    PendingIntent openPi = PendingIntent.getActivity(
-        this, NOTIF_ID, openIntent, piFlags);
+    PendingIntent openPi = PendingIntent.getActivity(this, NOTIF_ID, openIntent, piFlags);
 
-    // ★ Кнопка «Завершить» — отправляет ACTION_STOP в этот же сервис.
+    // Кнопка «Завершить» — ACTION_STOP в этот же сервис (user-action, разрешён).
     Intent stopIntent = new Intent(this, CallService.class);
     stopIntent.setAction(ACTION_STOP);
-    PendingIntent stopPi = PendingIntent.getService(
-        this, NOTIF_ID + 1, stopIntent, piFlags);
+    PendingIntent stopPi = PendingIntent.getService(this, NOTIF_ID + 1, stopIntent, piFlags);
 
     String title = "Звонок активен";
     String body = (currentPeerName != null && !currentPeerName.isEmpty())
@@ -266,14 +317,15 @@ public class CallService extends Service {
     NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL_ID)
         .setContentTitle(title)
         .setContentText(body)
-        .setSmallIcon(android.R.drawable.stat_sys_phone_call)
+        // ★ Собственные иконки вместо системных (есть в res/drawable)
+        .setSmallIcon(R.drawable.ic_call)
         .setPriority(NotificationCompat.PRIORITY_LOW)
         .setCategory(NotificationCompat.CATEGORY_CALL)
         .setOngoing(true)
         .setAutoCancel(false)
         .setContentIntent(openPi)
         .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-        .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Завершить", stopPi);
+        .addAction(R.drawable.ic_call_end, "Завершить", stopPi);
 
     return b.build();
   }
@@ -286,12 +338,12 @@ public class CallService extends Service {
         nm.notify(NOTIF_ID, n);
       }
     } catch (Exception e) {
-      log.logError("updateNotification", e);
+      if (log != null) log.logError("updateNotification", e);
     }
   }
 
   // ============================================================
-  // stopReceiver (ACTION_STOP из endCallInternal / других мест)
+  // stopReceiver
   // ============================================================
 
   private void registerStopReceiver() {
@@ -306,7 +358,7 @@ public class CallService extends Service {
       }
       stopReceiverRegistered = true;
     } catch (Exception e) {
-      log.logError("registerStopReceiver", e);
+      if (log != null) log.logError("registerStopReceiver", e);
     }
   }
 
@@ -319,13 +371,10 @@ public class CallService extends Service {
   }
 
   // ============================================================
-  // Публичные хелперы для вызова из CallActivity / MealseApp
+  // Публичные хелперы
   // ============================================================
 
-  /**
-   * Запустить сервис (из CallActivity.onCreate, ветка new call).
-   * Идемпотентно — повторный startForegroundService обновит уведомление.
-   */
+  /** Запуск (из CallActivity после grant / onResume). Идемпотентно. */
   public static void start(Context ctx, String callId, String peerName) {
     try {
       Intent i = new Intent(ctx, CallService.class);
@@ -343,14 +392,13 @@ public class CallService extends Service {
   }
 
   /**
-   * Остановить сервис (из endCallInternal).
-   * Двойной вызов безопасен.
+   * ★ P6: остановка через stopService() — НЕ подвержен ограничению
+   * на старт сервисов из фона (Android 12+). onDestroy снимет heartbeat,
+   * уведомление и foreground-статус. Двойной вызов безопасен.
    */
   public static void stop(Context ctx) {
     try {
-      Intent i = new Intent(ctx, CallService.class);
-      i.setAction(ACTION_STOP);
-      ctx.startService(i); // STOP обработается в onStartCommand
+      ctx.stopService(new Intent(ctx, CallService.class));
     } catch (Exception e) {
       Log.e(TAG, "CallService.stop failed", e);
     }

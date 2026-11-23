@@ -837,7 +837,22 @@
       }
     }
 
+    /**
+     * ★ ИЗМЕНЕНО (P2): callee (isIncomingMode=true) НЕ должен вызывать
+     * attemptIceRestart — он ничего не отправляет (createOffer только
+     * для !isIncomingMode), но инкрементит iceRestartAttempts и после
+     * 3 холостых попыток шлёт onCallError('ICE restart: исчерпаны попытки')
+     * → endCallInternal → преждевременный обрыв callee.
+     *
+     * Теперь: callee ждёт re-offer от caller (его ICE-watchdog переотправит).
+     * Caller (isIncomingMode=false) — работает как раньше.
+     */
     function attemptIceRestart() {
+      // ★ P2: callee не инициирует restart — только ждёт re-offer от caller
+      if (isIncomingMode) {
+        log('ICE-RESTART: callee — пропускаем (ждём re-offer от caller)');
+        return;
+      }
       if (iceRestartInProgress) {
         log('ICE-RESTART: уже в процессе — игнорируем');
         return;
@@ -868,22 +883,20 @@
           // ★ НЕ вызываем restartIce() отдельно — createOffer({iceRestart:true})
           // сам сгенерирует новый ufrag и отправит его. Двойной вызов
           // (restartIce + createOffer) ломал signalingState.
-          if (!isIncomingMode) {
-            if (peerConnection.signalingState !== 'stable') {
-              log('ICE-RESTART: signalingState=' + peerConnection.signalingState
-                  + ' — пропускаем createOffer');
-              iceRestartInProgress = false;
-              return;
-            }
-            const offer = await peerConnection.createOffer({ iceRestart: true });
-            await peerConnection.setLocalDescription(offer);
-            window.android?.sendSignal(
-              'offer',
-              JSON.stringify(peerConnection.localDescription),
-              null
-            );
-            log('ICE-RESTART: offer отправлен');
+          if (peerConnection.signalingState !== 'stable') {
+            log('ICE-RESTART: signalingState=' + peerConnection.signalingState
+                + ' — пропускаем createOffer');
+            iceRestartInProgress = false;
+            return;
           }
+          const offer = await peerConnection.createOffer({ iceRestart: true });
+          await peerConnection.setLocalDescription(offer);
+          window.android?.sendSignal(
+            'offer',
+            JSON.stringify(peerConnection.localDescription),
+            null
+          );
+          log('ICE-RESTART: offer отправлен');
         } catch (e) {
           log('ICE-RESTART ошибка: ' + e.message);
           iceRestartInProgress = false;
@@ -937,8 +950,21 @@
       }
     };
 
-    // ★ ИЗМЕНЕНО (4.6 + рекомендация): merged-условие дедупликации +
-    // lastOfferSdp обновляется ПОСЛЕ успешного setRemoteDescription
+    /**
+     * ★ ИЗМЕНЕНО (4.6 + P4): merged-условие дедупликации + сброс PC
+     * при reconnect (failed/closed).
+     *
+     * Логика:
+     *  1. Если lastOfferSdp === sdp.sdp && signalingState === 'stable'
+     *     && connectionState !== 'failed' && !== 'closed' → stale-replay
+     *     на живом PC → игнор.
+     *  2. Если connectionState === 'failed' || === 'closed' →
+     *     пересоздать PC с нуля (reconnect). lastOfferSdp сбрасываем,
+     *     чтобы новый offer обработался.
+     *  3. Иначе — обычный processOffer.
+     *
+     * lastOfferSdp обновляется ПОСЛЕ успешного setRemoteDescription.
+     */
     async function processOffer(jsonStr) {
       if (!peerConnection) {
         log('processOffer: PC всё ещё null — некорректный вызов');
@@ -949,29 +975,36 @@
         const msg = JSON.parse(jsonStr);
         const sdp = JSON.parse(msg.payload.sdp);
 
-        // ★ Игнорируем stale-replay ТОЛЬКО на живом PC.
-        // При failed/closed — обрабатываем повторно (реконнект).
-        if (lastOfferSdp === sdp.sdp
-            && peerConnection.signalingState === 'stable'
-            && peerConnection.connectionState !== 'failed'
-            && peerConnection.connectionState !== 'closed') {
+        // ★ P4: если PC в failed/closed — пересоздаём с нуля
+        const st = peerConnection.connectionState;
+        if (st === 'failed' || st === 'closed') {
+          log('processOffer: PC в состоянии ' + st + ' — пересоздаю с нуля');
+          try { peerConnection.close(); } catch (e) {}
+          pendingCandidates = [];
+          remoteDescriptionSet = false;
+          lastOfferSdp = null;
+          lastAnswerSdp = null;
+          resetIceRestartState();
+          if (remoteVideo) remoteVideo.srcObject = null;
+          createPeerConnection();
+          log('processOffer: PC пересоздан для reconnect');
+        } else if (lastOfferSdp === sdp.sdp && peerConnection.signalingState === 'stable') {
+          // ★ stale-replay на живом PC — игнор
           log('processOffer: дубликат offer на живом PC — игнор');
           return;
         }
+
         pendingCandidates = [];
 
         await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
         remoteDescriptionSet = true;
-        // ★ ИЗМЕНЕНО (рекомендация): lastOfferSdp обновляем ПОСЛЕ
-        // успешного setRemoteDescription. Если set упадёт — lastOfferSdp
-        // не обновится, следующий тот же offer будет обработан заново.
+        // ★ lastOfferSdp — ПОСЛЕ успешного setRemoteDescription
         lastOfferSdp = sdp.sdp;
         log('setRemoteDescription(offer) OK');
         flushPendingCandidates();
 
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        // ★ ИЗМЕНЕНО (рекомендация): lastAnswerSdp — после setLocalDescription
         lastAnswerSdp = peerConnection.localDescription.sdp;
         log('createAnswer + setLocalDescription OK');
 
@@ -988,41 +1021,46 @@
       }
     }
 
-    // ★ ИЗМЕНЕНО (4.7 + рекомендация): guard signalingState + дедуп по
-    // lastAnswerSdp, обновление lastAnswerSdp ПОСЛЕ setRemoteDescription
+    /**
+     * ★ ИЗМЕНЕНО (4.7 + рекомендация): guard signalingState + дедуп по
+     * lastAnswerSdp, обновление lastAnswerSdp ПОСЛЕ setRemoteDescription.
+     *
+     * ★ P2: в catch — НЕ вызываем onCallError для "wrong state: stable"
+     * (это не фатальная ошибка, а дубль answer).
+     */
     window.onRemoteAnswer = async function(jsonStr) {
-  try {
-    log('onRemoteAnswer: получен');
-    if (!peerConnection) {
-      log('onRemoteAnswer: PC null');
-      return;
-    }
-    // ★ Guard signalingState — ДО JSON.parse, ДО setRemoteDescription
-    if (peerConnection.signalingState !== 'have-local-offer') {
-      log('onRemoteAnswer: signalingState=' + peerConnection.signalingState + ' — игнор');
-      return;
-    }
-    const msg = JSON.parse(jsonStr);
-    const sdp = JSON.parse(msg.payload.sdp);
-    if (lastAnswerSdp === sdp.sdp) {
-      log('onRemoteAnswer: дубликат — игнор');
-      return;
-    }
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-    remoteDescriptionSet = true;
-    lastAnswerSdp = sdp.sdp;
-    log('setRemoteDescription(answer) OK');
-    flushPendingCandidates();
-    setStatus('Соединение установлено');
-    resetIceRestartState();
-  } catch (e) {
-    log('onRemoteAnswer error: ' + e.message);
-    // ★ НЕ вызываем onCallError для "wrong state: stable" — это не фатально
-    if (e.message && e.message.indexOf('wrong state') === -1) {
-      window.android?.onCallError('Ошибка обработки answer: ' + e.message);
-    }
-  }
-};
+      try {
+        log('onRemoteAnswer: получен');
+        if (!peerConnection) {
+          log('onRemoteAnswer: PC null');
+          return;
+        }
+        // ★ Guard signalingState — ДО JSON.parse, ДО setRemoteDescription
+        if (peerConnection.signalingState !== 'have-local-offer') {
+          log('onRemoteAnswer: signalingState=' + peerConnection.signalingState + ' — игнор');
+          return;
+        }
+        const msg = JSON.parse(jsonStr);
+        const sdp = JSON.parse(msg.payload.sdp);
+        if (lastAnswerSdp === sdp.sdp) {
+          log('onRemoteAnswer: дубликат — игнор');
+          return;
+        }
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+        remoteDescriptionSet = true;
+        lastAnswerSdp = sdp.sdp;
+        log('setRemoteDescription(answer) OK');
+        flushPendingCandidates();
+        setStatus('Соединение установлено');
+        resetIceRestartState();
+      } catch (e) {
+        log('onRemoteAnswer error: ' + e.message);
+        // ★ P2: НЕ вызываем onCallError для "wrong state: stable" — это дубль answer
+        if (e.message && e.message.indexOf('wrong state') === -1) {
+          window.android?.onCallError('Ошибка обработки answer: ' + e.message);
+        }
+      }
+    };
 
     window.onRemoteCandidate = async function(jsonStr) {
       try {
@@ -1101,7 +1139,7 @@
 
     // ================ Fallback ================
 
-    log('call.html загружен (build with watchers v2, merged-offer-dedup-after-set, disconnect-watchdog, iceServers-cleanup, atomic-sdp-snapshot)');
+    log('call.html загружен (build with watchers v2, merged-offer-dedup-after-set, disconnect-watchdog, iceServers-cleanup, atomic-sdp-snapshot, callee-no-restart, reconnect-on-failed)');
   </script>
 </body>
 </html>

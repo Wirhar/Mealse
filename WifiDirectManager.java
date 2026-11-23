@@ -140,6 +140,16 @@ public class WifiDirectManager {
   /** ★ НОВОЕ: счётчик попыток reconnect сокет-канала. */
   private final AtomicInteger socketReconnectAttempts = new AtomicInteger(0);
 
+  /**
+   * ★ НОВОЕ (P5): дедуп вызовов scheduleSocketReconnect.
+   *
+   * Раньше scheduleSocketReconnect() вызывался из receiveLoop.finally И из sendThread.finally → +2 к socketReconnectAttempts за один обрыв. Плюс socketReconnectAttempts не сбрасывался в completeHandshake — 5 попыток исчерпывались за 2-3 реальных обрыва на длинном звонке.
+   *
+   * Теперь: - socketReconnectScheduled — true, пока reconnect уже запланирован (повторный вызов — no-op); - socketReconnectAttempts сбрасывается в completeHandshake.
+   */
+  private final java.util.concurrent.atomic.AtomicBoolean socketReconnectScheduled = new java.util.concurrent.atomic.AtomicBoolean(
+      false);
+
   // ============================================================
   // Вложенные классы
   // ============================================================
@@ -751,6 +761,9 @@ public class WifiDirectManager {
   /**
    * ★ ИЗМЕНЕНО: если канал уже жив (connected && handshakeDone && socketOut), повторный CONNECTION_CHANGED не трогаем — иначе можно пересоздать только что установленное соединение.
    */
+  /**
+   * ★ ИЗМЕНЕНО (P5): при !groupFormed — сброс socketReconnectScheduled (разрешаем новый цикл reconnect, когда группа появится снова).
+   */
   private void onConnectionInfoAvailable(WifiP2pInfo info) {
     if (info == null)
       return;
@@ -761,6 +774,7 @@ public class WifiDirectManager {
       groupOwner = false;
       groupOwnerAddress = null;
       socketReconnectAttempts.set(0);
+      socketReconnectScheduled.set(false); // ★ P5
       closeSockets();
       if (wasConnected)
         notifyDisconnected();
@@ -990,18 +1004,34 @@ public class WifiDirectManager {
    *
    * В отличие от scheduleChannelReopen (переоткрывает WifiP2pManager), этот метод НЕ трогает group — только переподнимает TCP-сокет.
    */
+  /**
+   * ★ ИЗМЕНЕНО (P5): дедуп через socketReconnectScheduled.
+   *
+   * Раньше: receiveLoop.finally и sendThread.finally вызывали этот метод одновременно → +2 к socketReconnectAttempts за один обрыв → бюджет (5 попыток) исчерпывался за 2-3 реальных обрыва.
+   *
+   * Теперь: только первый вызов планирует reconnect; повторные — no-op, пока запланированный не выполнится (или не будет отменён при connected=true).
+   */
   private void scheduleSocketReconnect() {
     if (!opened || connected)
       return;
+
+    // ★ P5: дедуп — если reconnect уже запланирован, не плодим попытки
+    if (!socketReconnectScheduled.compareAndSet(false, true)) {
+      log.log("scheduleSocketReconnect: уже запланирован — пропуск");
+      return;
+    }
+
     int attempt = socketReconnectAttempts.incrementAndGet();
     if (attempt > MAX_SOCKET_RECONNECT_ATTEMPTS) {
       log.warn("scheduleSocketReconnect: исчерпаны попытки");
+      socketReconnectScheduled.set(false);
       return;
     }
     long delay = SOCKET_RECONNECT_DELAYS_MS[Math.min(attempt - 1,
         SOCKET_RECONNECT_DELAYS_MS.length - 1)];
     log.log("scheduleSocketReconnect: попытка " + attempt + " через " + delay + "мс");
     mainHandler.postDelayed(() -> {
+      socketReconnectScheduled.set(false); // ★ P5: разрешаем следующий цикл
       if (!opened || connected)
         return;
       if (groupOwner) {
@@ -1191,10 +1221,17 @@ public class WifiDirectManager {
     }
   }
 
+  /**
+   * ★ ИЗМЕНЕНО (P5): сброс socketReconnectAttempts и socketReconnectScheduled после успешного handshake. Иначе бюджет reconnect исчерпывался за 2-3 реальных обрыва на длинном звонке (счётчик не сбрасывался).
+   */
   private void completeHandshake() {
     if (handshakeDone)
       return;
     handshakeDone = true;
+
+    // ★ P5: успешный handshake — сбрасываем бюджет reconnect
+    socketReconnectAttempts.set(0);
+    socketReconnectScheduled.set(false);
 
     // ★ КРИТИЧНО: без heartbeat TCP-сокет простаивает → Android
     // закрывает Wi-Fi P2P channel через ~30-60 секунд простоя →
@@ -1205,7 +1242,7 @@ public class WifiDirectManager {
     final Peer rp = remotePeer;
     final boolean go = groupOwner;
     mainHandler.post(() -> notifyConnectedInternal(rp, go));
-    log.log("completeHandshake: OK, heartbeat запущен");
+    log.log("completeHandshake: OK, heartbeat запущен, socketReconnectAttempts=0");
   }
 
   // ============================================================

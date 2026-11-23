@@ -25,7 +25,7 @@ import com.my.mealse.util.WifiDirectManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FileWriter;              // ★ НОВОЕ
+import java.io.FileWriter; // ★ НОВОЕ
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
@@ -64,6 +64,19 @@ public class MealseApp extends Application {
    * Раньше оба обработчика писали в crash.log → дублирование. Теперь: MealseLogger.CrashHandler → crash.log (форматированный), MealseApp → crash_direct.log (минимальный, с fsync).
    */
   private static final String CRASH_DIRECT_LOG_NAME = "crash_direct.log";
+
+  /**
+   * ★ НОВОЕ (P4): дедуп broadcast для candidate/answer/bye.
+   *
+   * Раньше в WD-режиме CallActivity.subscribeWifiDirectListener ловил эти сигналы напрямую (через sWdListener.onSignal → handleIncomingSignal), а MealseApp.handleWifiDirectSignal ДОПОЛНИТЕЛЬНО шлёт broadcast ACTION_SIGNAL → sSignalReceiver. Итого answer/candidate/bye приходили в движок дважды → "Called in wrong state: stable" (в логах: 22:32:06.688 и 22:32:06.690 — два onRemoteAnswer).
+   *
+   * Теперь: sWdListener в CallActivity фильтрует только offer (см. CallActivity), а MealseApp broadcast'ит candidate/answer/bye как раньше. Этот флаг — страховка на случай, если sWdListener всё же подписан на все типы: если CallActivity.isCallEngineActive() — не broadcast'им (сигнал дойдёт через sWdListener напрямую).
+   *
+   * Значение: true — не broadcast'ить candidate/answer/bye (движок жив, sWdListener доставит). false — broadcast'ить (движок мёртв, sSignalReceiver может быть не зарегистрирован, а buffered signal — нет).
+   *
+   * ★ По умолчанию false — полагаемся на broadcast (MealseApp — единая точка маршрутизации). Если в CallActivity решим оставить sWdListener на все типы — выставить true при активном движке.
+   */
+  private static final boolean SKIP_BROADCAST_IF_ENGINE_ALIVE = false;
 
   /**
    * ★ НОВОЕ: недавно завершённые call_id (WD-путь). Заполняется в handleWifiDirectSignal при bye (и в offer-ветке при busy), проверяется в handleWifiDirectSignal при повторном offer. Симметрично ServerService.recentlyEndedCalls.
@@ -253,6 +266,15 @@ public class MealseApp extends Application {
   /**
    * ★ ИЗМЕНЕНО: - candidate / answer / bye: на bye — markCallEndedCooldown(callId) перед broadcast (не return: broadcast нужен и собеседнику). - offer: cooldown-проверка ДО isCallActive; isCallActivityAlive(callId) — реальная проверка через CallActivity.isCallEngineActive. - busy: markCallEndedCooldown, чтобы повторный offer не показал входящий снова. - message / file_chunk — без изменений (прямой MessageReceiver).
    */
+  /**
+   * ★ ИЗМЕНЕНО (P4):
+   *
+   * 1. offer-ветка: различение same/new callId. - callId.equals(activeCallId) && isCallActivityAlive(activeCallId) → renegotiation: НЕ busy, НЕ cooldown, просто return (offer дойдёт через CallActivity.sWdListener / sSignalReceiver). - иначе → busy + markCallEndedCooldown (как раньше).
+   *
+   * 2. candidate/answer/bye: страховка SKIP_BROADCAST_IF_ENGINE_ALIVE — если движок жив и флаг true — не broadcast'им (sWdListener доставит). По умолчанию флаг false — broadcast'им всегда (единая точка маршрутизации MealseApp → sSignalReceiver).
+   *
+   * 3. message/file_chunk — без изменений (прямой MessageReceiver).
+   */
   private void handleWifiDirectSignal(String json) {
     MealseLogger log = MealseLogger.get(this, "MealseApp");
 
@@ -298,7 +320,6 @@ public class MealseApp extends Application {
           log.logError("handleWifiDirectSignal: прямой вызов MessageReceiver (message)", e);
         }
 
-        // retryFor для отложенных исходящих, адресованных этому пиру
         try {
           WifiDirectManager.Peer remote = wifiDirectManager != null
               ? wifiDirectManager.getRemotePeer()
@@ -332,14 +353,13 @@ public class MealseApp extends Application {
 
       // ============================================================
       // candidate / answer / bye — broadcast для CallActivity.signalReceiver
-      // ★ ИЗМЕНЕНО: на bye — markCallEndedCooldown ДО broadcast (не return)
+      // ★ P4: страховка — если движок жив и SKIP_BROADCAST_IF_ENGINE_ALIVE,
+      // не broadcast'им (sWdListener доставит напрямую).
       // ============================================================
       if ("candidate".equals(type) || "answer".equals(type) || "bye".equals(type)) {
         CallStateManager csm = new CallStateManager(this);
         if (!csm.isCallActive()) {
           log.log("handleWifiDirectSignal: " + type + " — нет активного звонка, игнорирую");
-          // ★ даже без активного звонка на bye — пометить call_id,
-          // чтобы последующий offer не показал входящий повторно
           if ("bye".equals(type)) {
             String byeCallId = obj.has("call_id") && !obj.get("call_id").isJsonNull()
                 ? obj.get("call_id").getAsString()
@@ -348,6 +368,20 @@ public class MealseApp extends Application {
           }
           return;
         }
+
+        // ★ P4: страховка от двойной доставки
+        if (SKIP_BROADCAST_IF_ENGINE_ALIVE && isCallActivityAlive(csm.getActiveCallId())) {
+          log.log("handleWifiDirectSignal: " + type
+              + " — движок жив, sWdListener доставит напрямую → без broadcast");
+          if ("bye".equals(type)) {
+            String byeCallId = obj.has("call_id") && !obj.get("call_id").isJsonNull()
+                ? obj.get("call_id").getAsString()
+                : null;
+            markCallEndedCooldown(byeCallId);
+          }
+          return;
+        }
+
         if ("bye".equals(type)) {
           String byeCallId = obj.has("call_id") && !obj.get("call_id").isJsonNull()
               ? obj.get("call_id").getAsString()
@@ -411,18 +445,26 @@ public class MealseApp extends Application {
           + shortId(activeCallId));
 
       if (callActive) {
-        // ★ ИЗМЕНЕНО: реальная проверка движка для текущего activeCallId
+        // ★ ИЗМЕНЕНО (P4): различение same/new callId
+        boolean isSameCall = callId.equals(activeCallId);
         boolean callEngineAlive = isCallActivityAlive(activeCallId);
-        log.log("  CallStateManager: callEngineAlive=" + callEngineAlive);
+        log.log("  CallStateManager: callEngineAlive=" + callEngineAlive + ", isSameCall="
+            + isSameCall);
 
         if (!callEngineAlive) {
           log.warn("handleWifiDirectSignal: флаг звонка висит, но движок мёртв — сбрасываю");
           csm.clearCallActive();
+          // продолжаем как для нового звонка — покажем входящий
+        } else if (isSameCall) {
+          // ★ P4: renegotiation — НЕ busy, НЕ cooldown.
+          // Offer дойдёт через CallActivity.sWdListener / sSignalReceiver.
+          log.log("handleWifiDirectSignal: offer для АКТИВНОГО звонка (renegotiation) — "
+              + "пропускаю в IncomingCallActivity, доставит sWdListener/sSignalReceiver");
+          return;
         } else {
+          // другой callId при живом движке — busy + cooldown
           log.warn("handleWifiDirectSignal: ❌ звонок уже активен (" + shortId(activeCallId)
-              + ") — busy-bye + cooldown");
-          // ★ НОВОЕ: пометить call_id в cooldown, чтобы повторный offer
-          // от вызывающего не показал входящий снова
+              + "), новый callId=" + shortId(callId) + " — busy + cooldown");
           markCallEndedCooldown(callId);
           return;
         }
