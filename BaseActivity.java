@@ -48,6 +48,15 @@ import androidx.core.view.WindowInsetsCompat;
  * ★ НОВОЕ (утилиты):
  *   hideKeyboard(), keepScreenOn() — мелкие, но реально нужные
  *   в редакторе, плеере, звонке.
+ *
+ * ★ ФИКС клавиатуры (applyWindowInsets):
+ *   Раньше корень.padдился только systemBars() и возвращал CONSUMED —
+ *   IME-insets (клавиатура) в layout не доходили, и на targetSdk 35
+ *   (где окно не сжимается под клавиатуру) поле ввода оставалось под
+ *   клавиатурой. Теперь bottom = max(systemBars.bottom, ime.bottom):
+ *   панель ввода поднимается над клавиатурой, как в CallActivity
+ *   (который наследует Activity напрямую и потому этого listener'а
+ *   не имеет).
  */
 public abstract class BaseActivity extends Activity {
 
@@ -139,6 +148,18 @@ public abstract class BaseActivity extends Activity {
   /**
    * Применяет WindowInsets к корневому View. Работает на API 29+.
    * Требует androidx.core; если его нет — тихо пропускаем.
+   *
+   * ★ ФИКС клавиатуры: учитываем IME-insets. Раньше.padдили только
+   * systemBars() и возвращали CONSUMED — клавиатура не поднимала
+   * контент (на targetSdk 35 окно не сжимается под IME). Теперь
+   * bottom = max(systemBars.bottom, ime.bottom) — панель ввода
+   * поднимается над клавиатурой.
+   *
+   * Возврат CONSUMED здесь осознанный: корень уже применил insets,
+   * дочерние fitsSystemWindows="true" получат нули и не задублируют
+   * padding. Если когда-нибудь дочернему view понадобятся insets
+   * отдельно — схему надо будет перестроить (не потреблять в корне,
+   * а применять адресно).
    */
   private void applyWindowInsets() {
     try {
@@ -147,7 +168,11 @@ public abstract class BaseActivity extends Activity {
         return;
       ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
         Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
-        v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+        Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+        int bottom = Math.max(bars.bottom, ime.bottom);
+        // setPadding идемпотентен: фреймворк сам не дёрнет requestLayout,
+        // если значения не изменились.
+        v.setPadding(bars.left, bars.top, bars.right, bottom);
         return WindowInsetsCompat.CONSUMED;
       });
       ViewCompat.requestApplyInsets(root);
