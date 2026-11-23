@@ -158,6 +158,24 @@
       return 'unknown';
     }
 
+    /**
+     * ★ НОВОЕ (замечание 1): поиск sender по kind, включая fallback на
+     * transceiver без трека (созданный addTransceiver после ended-трека).
+     *
+     * Используется в ensureLocalTracks и switchCamera, чтобы подхватить
+     * sender от addTransceiver-fallback (когда addTrack на ended-треке
+     * бросил бы).
+     */
+    function findSenderForKind(kind) {
+      // 1) sender с треком того же kind (живым или ended)
+      const s = peerConnection.getSenders().find(x => x.track && x.track.kind === kind);
+      if (s) return s;
+      // 2) fallback: transceiver без трека (создан addTransceiver после ended-трека)
+      const tr = peerConnection.getTransceivers().find(t =>
+          !t.sender.track && t.receiver && t.receiver.track && t.receiver.track.kind === kind);
+      return tr ? tr.sender : null;
+    }
+
     // ================ Java-интерфейс ================
 
     window.configureIce = function(jsonString) {
@@ -341,6 +359,11 @@
       });
     }
 
+    /**
+     * ★ ИЗМЕНЕНО (замечание 1): поиск sender через findSenderForKind
+     * (включая fallback на transceiver без трека). Если sender нет вовсе —
+     * best-effort addTrack.
+     */
     async function ensureLocalTracks() {
       if (!localStream || !peerConnection) return;
       const vt = localStream.getVideoTracks()[0];
@@ -356,12 +379,18 @@
           audio: needAudio
         });
         for (const newTrack of fresh.getTracks()) {
-          const sender = peerConnection.getSenders()
-              .find(s => s.track && s.track.kind === newTrack.kind);
+          // ★ ФИКС: ищем sender и среди null-track transceiver'ов
+          // (fallback addTransceiver после ended-трека)
+          const sender = findSenderForKind(newTrack.kind);
           const old = newTrack.kind === 'video' ? vt : at;
           if (sender) {
             try { await sender.replaceTrack(newTrack); } catch (e) {
               log('ensureLocalTracks: replaceTrack error: ' + e.message);
+            }
+          } else {
+            // sender нет вовсе — крайний случай, добавляем трек (best effort)
+            try { peerConnection.addTrack(newTrack, localStream); } catch (e) {
+              log('ensureLocalTracks: addTrack fallback error: ' + e.message);
             }
           }
           if (old) {
@@ -474,14 +503,9 @@
           deviceId: s.deviceId
         }));
 
-        let videoSender = null;
-        const senders = peerConnection.getSenders();
-        for (const sr of senders) {
-          if (sr.track && sr.track.kind === 'video') {
-            videoSender = sr;
-            break;
-          }
-        }
+        // ★ ФИКС (замечание 1): используем findSenderForKind — подхватит
+        // sender от addTransceiver-fallback (ended-трек).
+        let videoSender = findSenderForKind('video');
         if (!videoSender) {
           log('switchCamera: videoSender не найден — новый трек закрываю');
           newVideoTrack.stop();
@@ -534,9 +558,26 @@
       peerConnection = new RTCPeerConnection(config);
       log('PC создан: ' + JSON.stringify(config) + ', iceMode=' + iceMode);
 
+      // ★ ФИКС (замечание 1): ended-трек не addTrack (может бросить на
+      // части WebView), а addTransceiver(kind, sendrecv) — sender будет,
+      // ensureLocalTracks сделает replaceTrack без renegotiation.
       localStream.getTracks().forEach(track => {
-        log('Добавляю трек: ' + track.kind);
-        peerConnection.addTrack(track, localStream);
+        log('Добавляю трек: ' + track.kind + ' (readyState=' + track.readyState + ')');
+        try {
+          if (track.readyState === 'ended') {
+            peerConnection.addTransceiver(track.kind, { direction: 'sendrecv' });
+            log('addTrack: трек ended → addTransceiver(' + track.kind + ')');
+          } else {
+            peerConnection.addTrack(track, localStream);
+          }
+        } catch (e) {
+          log('addTrack(' + track.kind + ') error: ' + e.message + ' → addTransceiver');
+          try {
+            peerConnection.addTransceiver(track.kind, { direction: 'sendrecv' });
+          } catch (e2) {
+            log('addTransceiver(' + track.kind + ') error: ' + e2.message);
+          }
+        }
       });
 
       remoteVideo.onloadedmetadata = () => {
@@ -951,16 +992,18 @@
     };
 
     /**
-     * ★ ИЗМЕНЕНО (4.6 + P4): merged-условие дедупликации + сброс PC
-     * при reconnect (failed/closed).
+     * ★ ИЗМЕНЕНО (4.6 + P4 + замечание 1): merged-условие дедупликации +
+     * сброс PC при reconnect (failed/closed) + await ensureLocalTracks()
+     * ДО пересоздания (чтобы вернуть живые треки до addTrack).
      *
      * Логика:
      *  1. Если lastOfferSdp === sdp.sdp && signalingState === 'stable'
      *     && connectionState !== 'failed' && !== 'closed' → stale-replay
      *     на живом PC → игнор.
-     *  2. Если connectionState === 'failed' || === 'closed' →
-     *     пересоздать PC с нуля (reconnect). lastOfferSdp сбрасываем,
-     *     чтобы новый offer обработался.
+     *  2. Если connectionState === 'failed' || === 'closed':
+     *     a. await ensureLocalTracks() — вернуть живые треки ДО close()
+     *        (пока peerConnection non-null, иначе early-return);
+     *     b. close(); сброс; createPeerConnection().
      *  3. Иначе — обычный processOffer.
      *
      * lastOfferSdp обновляется ПОСЛЕ успешного setRemoteDescription.
@@ -975,10 +1018,17 @@
         const msg = JSON.parse(jsonStr);
         const sdp = JSON.parse(msg.payload.sdp);
 
-        // ★ P4: если PC в failed/closed — пересоздаём с нуля
         const st = peerConnection.connectionState;
         if (st === 'failed' || st === 'closed') {
           log('processOffer: PC в состоянии ' + st + ' — пересоздаю с нуля');
+
+          // ★ ФИКС (замечание 1): вернуть живые треки ДО re-add.
+          // Вызываем ДО close(), чтобы peerConnection был non-null и
+          // ensureLocalTracks не вышел по early-return.
+          try { await ensureLocalTracks(); } catch (e) {
+            log('processOffer: ensureLocalTracks перед reconnect: ' + e.message);
+          }
+
           try { peerConnection.close(); } catch (e) {}
           pendingCandidates = [];
           remoteDescriptionSet = false;
@@ -1139,7 +1189,7 @@
 
     // ================ Fallback ================
 
-    log('call.html загружен (build with watchers v2, merged-offer-dedup-after-set, disconnect-watchdog, iceServers-cleanup, atomic-sdp-snapshot, callee-no-restart, reconnect-on-failed)');
+    log('call.html загружен (build with watchers v2, merged-offer-dedup-after-set, disconnect-watchdog, iceServers-cleanup, atomic-sdp-snapshot, callee-no-restart, reconnect-on-failed, find-sender-for-kind)');
   </script>
 </body>
 </html>

@@ -43,6 +43,12 @@ import com.my.mealse.util.MealseLogger;
  *
  * ★ P6: остановка через stopService() (не startService из фона).
  *
+ * ★ P2 (замечание 2): targetNodeId передаётся в сервис через
+ *   EXTRA_TARGET_NODE и сохраняется в currentTargetNodeId. При
+ *   ensureCallActive() (переустановка флага после автосброса) не
+ *   теряем данные узла — берём currentTargetNodeId, иначе существующий
+ *   из prefs.
+ *
  * Сервис НЕ держит WebView — это делает статический retained-движок
  * в CallActivity (sWebView).
  */
@@ -55,8 +61,13 @@ public class CallService extends Service {
   public static final String ACTION_STOP  = "com.my.mealse.call.STOP";
 
   // ===== Extras =====
-  public static final String EXTRA_CALL_ID   = "call_id";
-  public static final String EXTRA_PEER_NAME = "peer_name";
+  public static final String EXTRA_CALL_ID     = "call_id";
+  public static final String EXTRA_PEER_NAME   = "peer_name";
+  /**
+   * ★ НОВОЕ (замечание 2): targetNodeId — чтобы ensureCallActive()
+   * не терял данные узла при переустановке флага после автосброса.
+   */
+  public static final String EXTRA_TARGET_NODE = "target_node";
 
   // ===== Notification =====
   private static final String CHANNEL_ID = "MealseActiveCallChannel";
@@ -74,6 +85,8 @@ public class CallService extends Service {
   private volatile boolean foregroundStarted = false;
   private String currentCallId;
   private String currentPeerName;
+  /** ★ НОВОЕ (замечание 2): targetNodeId из Intent. */
+  private String currentTargetNodeId;
 
   /** P3: цикл heartbeat. Не держит Activity; останавливается со смертью сервиса. */
   private final Runnable heartbeatRunnable = new Runnable() {
@@ -163,8 +176,11 @@ public class CallService extends Service {
     if (ACTION_START.equals(action)) {
       currentCallId = intent.getStringExtra(EXTRA_CALL_ID);
       currentPeerName = intent.getStringExtra(EXTRA_PEER_NAME);
+      // ★ НОВОЕ (замечание 2): читаем targetNodeId
+      currentTargetNodeId = intent.getStringExtra(EXTRA_TARGET_NODE);
 
-      log("Звонок: callId=" + shortId(currentCallId) + ", peer=" + currentPeerName);
+      log("Звонок: callId=" + shortId(currentCallId) + ", peer=" + currentPeerName
+          + ", node=" + currentTargetNodeId);
 
       ensureCallActive();   // P3: (ре)активируем флаг после grant/долгого ожидания
       updateNotification();
@@ -211,14 +227,23 @@ public class CallService extends Service {
   /**
    * Если флаг call_active успел сброситься (например, пользователь долго
    * выдавал разрешения и heartbeat ещё не шёл) — переустанавливаем его.
-   * targetNodeId сохраняем, чтобы не потерять данные узла.
+   *
+   * ★ ИЗМЕНЕНО (замечание 2): targetNodeId НЕ теряем. Берём из
+   * currentTargetNodeId (передан в Intent), иначе — существующий из prefs.
+   * Раньше при автосбросе getActiveTargetNode() возвращал null, и флаг
+   * переустанавливался с null → данные узла в prefs затирались.
    */
   private void ensureCallActive() {
     try {
       if (callStateManager == null) callStateManager = new CallStateManager(this);
       if (currentCallId != null && !callStateManager.isCallActive()) {
-        callStateManager.setCallActive(currentCallId, callStateManager.getActiveTargetNode());
-        log("ensureCallActive: флаг переустановлен для " + shortId(currentCallId));
+        // ★ ФИКС: не теряем targetNodeId — берём переданный, иначе существующий
+        String node = (currentTargetNodeId != null && !currentTargetNodeId.isEmpty())
+            ? currentTargetNodeId
+            : callStateManager.getActiveTargetNode();
+        callStateManager.setCallActive(currentCallId, node);
+        log("ensureCallActive: флаг переустановлен для " + shortId(currentCallId)
+            + ", node=" + node);
       }
     } catch (Exception e) {
       log("ensureCallActive error: " + e.getMessage());
@@ -376,11 +401,21 @@ public class CallService extends Service {
 
   /** Запуск (из CallActivity после grant / onResume). Идемпотентно. */
   public static void start(Context ctx, String callId, String peerName) {
+    start(ctx, callId, peerName, null);
+  }
+
+  /**
+   * ★ НОВОЕ (замечание 2): перегрузка с targetNodeId.
+   * Чтобы ensureCallActive() не терял данные узла при переустановке
+   * флага после автосброса, CallActivity передаёт targetNodeId сюда.
+   */
+  public static void start(Context ctx, String callId, String peerName, String targetNodeId) {
     try {
       Intent i = new Intent(ctx, CallService.class);
       i.setAction(ACTION_START);
       if (callId != null) i.putExtra(EXTRA_CALL_ID, callId);
       if (peerName != null) i.putExtra(EXTRA_PEER_NAME, peerName);
+      if (targetNodeId != null) i.putExtra(EXTRA_TARGET_NODE, targetNodeId);
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         ctx.startForegroundService(i);
       } else {

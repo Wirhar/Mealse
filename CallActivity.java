@@ -81,9 +81,6 @@ public class CallActivity extends Activity {
 
   // ============================================================================
   // RETained Call Engine (static, переживает пересоздание Activity)
-  //
-  // Всё, что относится к ЖИЗНИ звонка, — static. Activity-поля — только UI
-  // (кнопки чата, адаптер, executor чата и т.п.).
   // ============================================================================
 
   /** Lock для всех мутаций движка (создание/уничтожение). */
@@ -97,9 +94,6 @@ public class CallActivity extends Activity {
 
   /** Текущая Activity или null, если UI уничтожен, а движок жив. */
   private static CallActivity sUi;
-
-  /** Логгер движка (не привязан к Activity). */
-  private static MealseLogger sLog;
 
   /** WebRTC-WebView. Создаётся на application-контексте, живёт вне Activity. */
   private static WebView sWebView;
@@ -130,13 +124,22 @@ public class CallActivity extends Activity {
   private static volatile String sIncomingOfferJson;
   private static volatile boolean sIncomingOfferHandled = false;
 
-  // ----- Флаги завершения -----
   /**
-   * ★ byeAlreadySent — true, если bye уже отправлен/получен. Сбрасывается ТОЛЬКО в onCreate (ветка new), не в конце endCallInternal — иначе возможен дубль bye между endCallInternal и onCreate нового звонка.
+   * ★ НОВОЕ (замечание 2): targetNodeId в static-поле.
+   *
+   * Раньше targetNodeId — instance-поле. При reuse-ветке onCreate
+   * (пересоздание Activity) он читался из intent; если intent без
+   * "target_node_id" (запуск из уведомления) — терялся. При автосбросе
+   * CallStateManager (heartbeat > 15 с) getActiveTargetNode() = null
+   * → флаг переустанавливался с null.
+   *
+   * Теперь sTargetNodeId переживает reuse и автосброс. startCallServiceIfPermitted
+   * передаёт его в CallService → ensureCallActive не теряет данные узла.
    */
-  private static volatile boolean sByeAlreadySent = false;
+  private static volatile String sTargetNodeId;
 
-  /** endingByUser — true, если завершение инициировано (пользователем/собеседником). */
+  // ----- Флаги завершения -----
+  private static volatile boolean sByeAlreadySent = false;
   private static volatile boolean sEndingByUser = false;
 
   // ----- SignalReceiver и WD-listener (static, живут вне Activity) -----
@@ -162,10 +165,7 @@ public class CallActivity extends Activity {
     }
   }
 
-  /** Ленивая инициализация static-логгера. */
-  /**
-   * ★ ИЗМЕНЕНО (п.18): всегда через MealseLogger.get(sAppCtx, TAG) — он сам кеширует в instances. Убран двойной кеш sLog: после MealseLogger.resetAll() (в MealseApp.onCreate) instances.clear(), но sLog не сбрасывался → slog() возвращал старый logger с закрытым writer. Теперь кеш только в MealseLogger.
-   */
+  /** ★ ИЗМЕНЕНО (п.18): всегда через MealseLogger.get(sAppCtx, TAG) — он сам кеширует. */
   private static MealseLogger slog() {
     if (sAppCtx == null)
       return null;
@@ -176,7 +176,6 @@ public class CallActivity extends Activity {
   // Поля UI/чата (instance, живут вместе с Activity)
   // ============================================================================
 
-  // Оверлей чата
   private ImageButton btnChatToggle;
   private View chatOverlay;
   private ImageButton chatBtnClose;
@@ -199,7 +198,6 @@ public class CallActivity extends Activity {
   private final Handler chatUi = new Handler(Looper.getMainLooper());
   private boolean chatReceiverRegistered = false;
 
-  /** Приёмник событий мессенджера (MESSAGE_NEW/STATUS/PROGRESS) для чата звонка. */
   private final BroadcastReceiver chatRefreshReceiver = new BroadcastReceiver() {
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -229,7 +227,6 @@ public class CallActivity extends Activity {
     }
   };
 
-  // Менеджеры (instance — нужны только Activity; в static-части используются через sAppCtx)
   private MealseLogger log;
   private SecureAuthManager secureAuthManager;
   private NodeManager nodeManager;
@@ -254,16 +251,9 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // Публичный статический API для MealseApp / CallService / других
+  // Публичный статический API
   // ============================================================================
 
-  /**
-   * ★ isCallEngineActive — замена фиктивного isCallActivityAlive() в MealseApp.
-   *
-   * Возвращает true, если движок жив (sWebView != null, !sCallEnded) и callId совпадает (или callId == null — проверка «жив ли хоть какой-то»).
-   *
-   * Используется в: - ServerService.handleIncomingOffer — «флаг звонка висит, но CallActivity мёртв?» - MealseApp.handleWifiDirectSignal — маршрутизация offer.
-   */
   public static boolean isCallEngineActive(String callId) {
     synchronized (ENGINE_LOCK) {
       if (sWebView == null || sCallEnded)
@@ -279,17 +269,12 @@ public class CallActivity extends Activity {
   private static CallStateManager sCallStateManager;
 
   // ===== P1: gate инициализации JS и старта FGS по runtime-разрешениям =====
-  /** setIncomingMode/offer отправлены в JS только после grant CAMERA+RECORD_AUDIO. */
   private static volatile boolean sJsInitSent = false;
-  /** CallService реально стартовал (чтобы не дёргать stop до старта). */
   private static volatile boolean sCallServiceStarted = false;
 
   /**
-   * ★ НОВОЕ (P0, BUG-CA6): OnBackInvokedCallback для API 33+.
-   *
-   * На API 33+ при enableOnBackInvokedCallback="true" (в манифесте) система НЕ вызывает onBackPressed() — дефолтный back-callback просто finish'ит Activity, минуя endCallByUser() → bye не уходит, retained-движок + CallService продолжают жить (зомби-звонок).
-   *
-   * Регистрируется в onCreate ДО развилки reuse/new (иначе в reuse-ветке callback не зарегистрируется — там ранний return). Снимается в onDestroy.
+   * ★ P0 (BUG-CA6): OnBackInvokedCallback для API 33+.
+   * Регистрируется в onCreate ДО развилки reuse/new.
    */
   private android.window.OnBackInvokedCallback backInvokedCallback;
 
@@ -309,10 +294,8 @@ public class CallActivity extends Activity {
     try {
       setContentView(R.layout.activity_call);
 
-      // ★ НОВОЕ (P0, BUG-CA6): регистрируем OnBackInvokedCallback ДО
-      // развилки reuse/new. В reuse-ветке ниже стоит ранний return —
-      // если регистрировать после неё, callback не зарегистрируется при
-      // пересоздании Activity, и back снова сломается.
+      // ★ P0: OnBackInvokedCallback ДО развилки reuse/new (иначе в reuse-ветке
+      // callback не зарегистрируется — там ранний return).
       if (Build.VERSION.SDK_INT >= 33) {
         try {
           backInvokedCallback = () -> {
@@ -340,7 +323,15 @@ public class CallActivity extends Activity {
         if (sWebView != null && !sCallEnded && sCallId != null && sCallId.equals(requestedCallId)) {
           log.log("onCreate: REUSE движка, callId=" + shortId(sCallId));
 
-          targetNodeId = intent.getStringExtra("target_node_id");
+          // ★ ИЗМЕНЕНО (замечание 2): targetNodeId из intent ИЛИ sTargetNodeId
+          String nid = intent.getStringExtra("target_node_id");
+          if (nid != null && !nid.isEmpty()) {
+            targetNodeId = nid;
+            sTargetNodeId = nid;
+          } else {
+            targetNodeId = sTargetNodeId; // не теряем при запуске из уведомления
+          }
+
           sCallStateManager = new CallStateManager(this);
 
           attachRetainedWebView();
@@ -376,6 +367,9 @@ public class CallActivity extends Activity {
       // ВЕТКА 2: новый звонок
       // ------------------------------------------------------------------
       targetNodeId = intent.getStringExtra("target_node_id");
+      // ★ НОВОЕ (замечание 2): сохраняем в static — переживает reuse/автосброс
+      sTargetNodeId = targetNodeId;
+
       sTargetIp = intent.getStringExtra("target_ip");
       sTargetPort = intent.getIntExtra("target_port", 8081);
       sIsIncoming = intent.getBooleanExtra("is_incoming", false);
@@ -528,9 +522,6 @@ public class CallActivity extends Activity {
       initCallConversation();
       subscribeChatReceiver();
 
-      // P1: FGS camera|microphone стартует ЗДЕСЬ только если разрешения уже
-      // выданы; иначе — в onRequestPermissionsResult после grant. Без grant
-      // startForeground(type=camera|mic) на API 34+ кидает SecurityException.
       startCallServiceIfPermitted();
 
       log.log("══ onCreate END (new) ══ — targetIp=" + sTargetIp + ":" + sTargetPort + ", callId="
@@ -544,8 +535,7 @@ public class CallActivity extends Activity {
     }
   }
 
-  /** Имя собеседника для уведомления CallService. */
-  /** Имя собеседника для уведомления CallService (static — работает без Activity). */
+  /** ★ static (замечание 2 — работает без Activity). */
   private static String resolvePeerName() {
     try {
       if (sTargetFingerprint != null && !sTargetFingerprint.isEmpty() && sAppCtx != null) {
@@ -574,7 +564,8 @@ public class CallActivity extends Activity {
   }
 
   /**
-   * P1: старт CallService ТОЛЬКО при выданных CAMERA+RECORD_AUDIO. Вызывается из onCreate (обе ветки), onResume и onRequestPermissionsResult. Идемпотентно: повторный start просто обновляет уведомление.
+   * ★ ИЗМЕНЕНО (замечание 2): передаём sTargetNodeId в CallService.
+   * Чтобы ensureCallActive не терял данные узла при автосбросе.
    */
   private static void startCallServiceIfPermitted() {
     if (sCallEnded || sCallId == null || sAppCtx == null)
@@ -586,12 +577,13 @@ public class CallActivity extends Activity {
       return;
     }
     try {
-      CallService.start(sAppCtx, sCallId, resolvePeerName());
+      // ★ ФИКС (замечание 2): + sTargetNodeId
+      CallService.start(sAppCtx, sCallId, resolvePeerName(), sTargetNodeId);
       sCallServiceStarted = true;
       MealseLogger l = slog();
       if (l != null)
-        l.log(
-            "startCallServiceIfPermitted: CallService.start OK, callId=" + shortIdStatic(sCallId));
+        l.log("startCallServiceIfPermitted: CallService.start OK, callId=" + shortIdStatic(sCallId)
+            + ", node=" + sTargetNodeId);
     } catch (Exception e) {
       MealseLogger l = slog();
       if (l != null)
@@ -600,7 +592,7 @@ public class CallActivity extends Activity {
   }
 
   /**
-   * P1: отправляет setIncomingMode (+ сохранённый offer) в JS только после grant. До grant getUserMedia в call.html упал бы с NotAllowedError → onCallError → звонок завершился бы ещё до выдачи разрешений. Сигналы до grant буферизуются.
+   * P1: отправляет setIncomingMode (+ сохранённый offer) в JS только после grant.
    */
   private static void onMediaPermissionsReady() {
     if (sCallEnded || sWebView == null || sWebViewDestroyed || !sWebViewLoaded)
@@ -629,16 +621,9 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // attachRetainedWebView — подмена placeholder-WebView на sWebView
+  // attachRetainedWebView
   // ============================================================================
 
-  /**
-   * Подменяет WebView-заглушку из activity_call.xml на retained sWebView.
-   *
-   * Файл разметки менять не нужно: там остаётся <WebView id="@+id/webview_call" />. При reuse-ветке findViewById вернёт именно его, а мы заменяем на sWebView.
-   *
-   * ★ Важно: не передаём placeholder.getLayoutParams() в sWebView напрямую, чтобы избежать ClassCastException на прошивках, где parent — не FrameLayout.
-   */
   private void attachRetainedWebView() {
     View placeholder = findViewById(R.id.webview_call);
     if (placeholder == null) {
@@ -656,7 +641,6 @@ public class CallActivity extends Activity {
     if (sWebView.getParent() instanceof ViewGroup) {
       ((ViewGroup) sWebView.getParent()).removeView(sWebView);
     }
-    // ★ Без явного LayoutParams — возьмёт MATCH_PARENT из addView(index)
     parent.addView(sWebView, index);
     try {
       sWebView.onResume();
@@ -666,14 +650,9 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // setupWebView — создаёт retained sWebView на application-контексте
+  // setupWebView
   // ============================================================================
 
-  /**
-   * Создаёт sWebView один раз на процесс.
-   *
-   * ★ Отличия от старой версии: - new WebView(getApplicationContext()) — переживает Activity; - отключён file-access и mixed content (call.html — локальный asset, сетевых ресурсов нет); - onPermissionRequest — grant только для file:///android_asset и только video/audio capture; - onJsAlert/onJsConfirm — свои диалоги, т.к. WebView на application- контексте без темы, системные не покажутся; - attachRetainedWebView() + loadUrl.
-   */
   private void setupWebView() {
     try {
       sWebView = new WebView(getApplicationContext());
@@ -690,7 +669,6 @@ public class CallActivity extends Activity {
       sWebView.addJavascriptInterface(new WebAppInterface(), "android");
       log.log("JS-интерфейс 'android' добавлен");
 
-      // P3: static-клиенты не захватывают CallActivity.this → нет утечки Activity
       sWebView.setWebViewClient(new EngineWebViewClient());
       log.log("WebViewClient установлен (static)");
       sWebView.setWebChromeClient(new EngineWebChromeClient());
@@ -705,7 +683,7 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // evaluateJs — static, работает без Activity
+  // evaluateJs
   // ============================================================================
 
   private static void evaluateJs(final String js) {
@@ -737,7 +715,6 @@ public class CallActivity extends Activity {
   // Static приём сигналов
   // ============================================================================
 
-  /** Создаёт sSignalReceiver один раз. */
   private static void ensureStaticSignalReceiver() {
     if (sSignalReceiver != null)
       return;
@@ -762,11 +739,6 @@ public class CallActivity extends Activity {
     };
   }
 
-  /**
-   * Обработка одного входящего сигнала.
-   *
-   * Правила: - фильтр по call_id (если sCallId задан); - если sWebView не готов — в sPendingSignals (буфер вне Activity); - иначе — dispatchSignal.
-   */
   private static void handleIncomingSignal(String json) {
     JsonObject obj;
     try {
@@ -795,7 +767,6 @@ public class CallActivity extends Activity {
     if (l != null)
       l.logSignal("RX", type, sCallId);
 
-    // WebView не готов → буфер вне Activity
     if (!sWebViewLoaded || sWebView == null || sWebViewDestroyed) {
       synchronized (sPendingSignals) {
         if (sPendingSignals.size() < 256)
@@ -804,8 +775,6 @@ public class CallActivity extends Activity {
       return;
     }
 
-    // P1: до grant не шлём offer/answer/candidate в JS (getUserMedia упадёт).
-    // bye пропускаем сразу — завершение не должно ждать разрешений.
     if (!hasMediaPermissions() && !"bye".equals(type)) {
       synchronized (sPendingSignals) {
         if (sPendingSignals.size() < 256)
@@ -817,7 +786,6 @@ public class CallActivity extends Activity {
     dispatchSignal(obj, type, json);
   }
 
-  /** Разводит сигнал по JS-функциям call.html. */
   private static void dispatchSignal(JsonObject obj, String type, String json) {
     String escaped = escapeForJsStatic(json);
     MealseLogger l = slog();
@@ -825,7 +793,6 @@ public class CallActivity extends Activity {
       case "offer":
         if (l != null)
           l.log("dispatch: offer → onRemoteOffer");
-        // ★ Всегда в JS: processOffer сам дедуплицирует stale-offer на живом PC
         evaluateJs("onRemoteOffer('" + escaped + "')");
         break;
       case "answer":
@@ -845,7 +812,6 @@ public class CallActivity extends Activity {
         break;
       case "message":
       case "file_chunk":
-        // Обрабатывается MessageReceiver — тихо пропускаем
         break;
       default:
         if (l != null)
@@ -853,9 +819,7 @@ public class CallActivity extends Activity {
     }
   }
 
-  /** Сливает sPendingSignals в JS (когда WebView готов). */
   private static void flushPendingSignals() {
-    // P1: пока разрешения не выданы — не сливаем (offer/answer/candidate ждут grant).
     if (!hasMediaPermissions())
       return;
 
@@ -960,7 +924,7 @@ public class CallActivity extends Activity {
         }
 
         /**
-         * P4: ТОЛЬКО offer. candidate/answer/bye уже доставляются через MealseApp.handleWifiDirectSignal → broadcast(ACTION_SIGNAL) → sSignalReceiver. Раньше listener слал ВСЕ типы + MealseApp тоже broadcast'ил candidate/answer/bye → двойной onRemoteAnswer/candidate. offer MealseApp в активный звонок не broadcast'ит (водит в IncomingCallActivity/busy), поэтому его берём напрямую здесь.
+         * P4: ТОЛЬКО offer (candidate/answer/bye — через MealseApp broadcast).
          */
         @Override
         public void onSignal(String json) {
@@ -1008,10 +972,9 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // Завершение звонка: handleBye / endCallByUser / endCallInternal / sendBye
+  // Завершение звонка
   // ============================================================================
 
-  /** Обработка bye от собеседника. */
   private static void handleBye(JsonObject obj) {
     String reason = "hangup";
     try {
@@ -1043,22 +1006,15 @@ public class CallActivity extends Activity {
       }
     });
 
-    // Собеседник уже знает — свой bye не шлём
     endCallInternal(false, r);
   }
 
-  /** Завершение по инициативе пользователя (назад / кнопка «Завершить»). */
   private void endCallByUser() {
     endCallInternal(true, "hangup");
   }
 
   /**
    * ★ Единая точка завершения.
-   *
-   * @param notifyPeer слать ли bye собеседнику (true — пользователь/ошибка, false — собеседник сам прислал bye).
-   * @param reason     причина для bye payload.
-   *
-   *                   Что делает: 1. Под ENGINE_LOCK: если sCallEnded — выходим (двойной вызов безопасен). 2. sCallEnded = true, sEndingByUser = true. 3. sendBye(reason) — если notifyPeer && !sByeAlreadySent; sByeAlreadySent = true. 4. unregisterSignalReceiver + unsubscribeWifiDirectListener. 5. Очистка sPendingSignals. 6. Уничтожение WebView (через sMainHandler.post — destroy() асинхронный). 7. clearCallActive. 8. CallService.stop. 9. finish() UI (если sUi жив). 10. Сброс sCallId и т.п., НО НЕ sCallEnded/sByeAlreadySent/sEndingByUser — они сбрасываются в onCreate (ветка new). Это защита от дубля bye.
    */
   private static void endCallInternal(boolean notifyPeer, String reason) {
     synchronized (ENGINE_LOCK) {
@@ -1114,7 +1070,6 @@ public class CallActivity extends Activity {
       } catch (Exception ignored) {
       }
 
-      // P1: останавливаем сервис только если он реально стартовал
       if (sCallServiceStarted) {
         try {
           CallService.stop(sAppCtx);
@@ -1136,13 +1091,13 @@ public class CallActivity extends Activity {
       sCallId = null;
       sTargetIp = null;
       sTargetFingerprint = null;
+      sTargetNodeId = null;   // ★ НОВОЕ (замечание 2): сброс
       sIncomingOfferJson = null;
       sIsIncoming = false;
       sIsWifiDirectMode = false;
     }
   }
 
-  /** Отправка bye (static, работает без Activity). */
   private static void sendBye(String reason) {
     try {
       JsonObject obj = new JsonObject();
@@ -1185,7 +1140,7 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // Lifecycle: onResume / onPause / onDestroy / onBackPressed / onNewIntent
+  // Lifecycle
   // ============================================================================
 
   @Override
@@ -1195,21 +1150,14 @@ public class CallActivity extends Activity {
     log.log("══ onResume START ══");
 
     if (!sCallEnded) {
-      // ★ P1 (п.8): self-heal FGS, если сервис был убит или разрешения
-      // выданы через Settings (а не через диалог).
       startCallServiceIfPermitted();
-
-      // ★ P1 (п.8): onMediaPermissionsReady() идемпотентен (sJsInitSent).
-      // Если разрешения выданы через Settings — onPageFinished уже отработал
-      // без setIncomingMode; здесь повторяем попытку.
       onMediaPermissionsReady();
 
-      // ★ P13 (страховка): пока сервис не стартовал, heartbeat не идёт,
-      // и isCallActive() мог автосброситься через 15 с. Обновляем timestamp,
-      // чтобы MealseApp при повторном offer не показал второй входящий.
+      // ★ ИЗМЕНЕНО (замечание 2): используем sTargetNodeId, не targetNodeId
       if (sCallStateManager != null && sCallId != null) {
         try {
-          sCallStateManager.setCallActive(sCallId, targetNodeId);
+          String node = (sTargetNodeId != null) ? sTargetNodeId : targetNodeId;
+          sCallStateManager.setCallActive(sCallId, node);
         } catch (Exception ignored) {
         }
       }
@@ -1236,23 +1184,14 @@ public class CallActivity extends Activity {
   @Override
   protected void onPause() {
     log.log("onPause");
-    // ★ При retained-движке heartbeat НЕ останавливаем в onPause:
-    // Activity может быть в фоне, но звонок жив. Останавливаем только
-    // в endCallInternal (через clearCallActive).
     super.onPause();
   }
 
-  /**
-   * ★ onDestroy НЕ уничтожает звонок.
-   *
-   * Логика: - если звонок НЕ завершён (sCallEnded == false) и sWebView != null — только detach'им WebView из layout (он остаётся жив в static); - если sCallEnded — движок уже уничтожен в endCallInternal, делать нечего; - clearCallActive — НЕ здесь (только в endCallInternal); - unregister receiver/listener — НЕ здесь (они static, живут вне Activity).
-   */
   @Override
   protected void onDestroy() {
     log.log("onDestroy START (callEnded=" + sCallEnded + ")");
 
-    // ★ P0 (п.19): снимаем OnBackInvokedCallback, чтобы уничтоженная
-    // Activity не получала back-события. Делаем ДО super.onDestroy().
+    // ★ P0 (п.19): снимаем OnBackInvokedCallback
     if (Build.VERSION.SDK_INT >= 33 && backInvokedCallback != null) {
       try {
         getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backInvokedCallback);
@@ -1262,7 +1201,6 @@ public class CallActivity extends Activity {
       backInvokedCallback = null;
     }
 
-    // Отписываемся только от чата (это instance-уровень)
     unsubscribeChatReceiver();
 
     if (!sCallEnded && sWebView != null) {
@@ -1283,9 +1221,6 @@ public class CallActivity extends Activity {
     super.onDestroy();
   }
 
-  /**
-   * onNewIntent — приходит, если CallActivity уже на вершине task (launchMode="singleTop") и пришёл повторный startActivity. Используется для reuse движка или для «уже идёт другой звонок».
-   */
   @Override
   protected void onNewIntent(Intent intent) {
     super.onNewIntent(intent);
@@ -1294,7 +1229,6 @@ public class CallActivity extends Activity {
 
     String newCallId = intent.getStringExtra(EXTRA_CALL_ID);
     if (newCallId == null) {
-      // Без callId — вероятно, повторный запуск «вернуться к звонку» из уведомления
       evaluateJs("onAppForegrounded()");
       return;
     }
@@ -1321,7 +1255,6 @@ public class CallActivity extends Activity {
         hideChat();
         return;
       }
-      // ★ Осознанное завершение — bye уходит сразу, не в onDestroy
       log.log("onBackPressed → endCallByUser");
       endCallByUser();
     } catch (Exception e) {
@@ -1384,7 +1317,6 @@ public class CallActivity extends Activity {
         return;
       }
 
-      // P1: разрешения получены — теперь можно и FGS camera|mic, и JS-инициализацию.
       startCallServiceIfPermitted();
       onMediaPermissionsReady();
     } catch (Exception e) {
@@ -1393,7 +1325,7 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // Проверка USE_FULL_SCREEN_INTENT (без изменений)
+  // Проверка USE_FULL_SCREEN_INTENT
   // ============================================================================
 
   private void checkFullScreenIntentPermission() {
@@ -1417,7 +1349,7 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // WebAppInterface — static (работает при мёртвом UI)
+  // WebAppInterface — static
   // ============================================================================
 
   static class WebAppInterface {
@@ -1531,7 +1463,7 @@ public class CallActivity extends Activity {
   }
 
   // ============================================================================
-  // Чат звонка (без изменений логики, только static-поля вместо instance)
+  // Чат звонка
   // ============================================================================
 
   private void initChatViews() {
@@ -1577,7 +1509,6 @@ public class CallActivity extends Activity {
     }
   }
 
-  /** Диалог выбора источника вложения (3 варианта — как в ChatActivity). */
   private void showAttachSourceDialog() {
     if (conversationId == null || conversationId.isEmpty()) {
       Toast.makeText(this, "Чат ещё не готов", Toast.LENGTH_SHORT).show();
@@ -1640,7 +1571,6 @@ public class CallActivity extends Activity {
     });
   }
 
-  /** Гарантирует self + peer в participants — иначе sendText не найдёт target. */
   private void ensureCallParticipants(String convId) {
     try {
       ParticipantRepository partRepo = new ParticipantRepository(this);
@@ -1955,7 +1885,7 @@ public class CallActivity extends Activity {
       return "?";
     return id.length() > 8 ? id.substring(0, 8) : id;
   }
-  
+
   private String shortId(String id) {
     return shortIdStatic(id);
   }
@@ -1995,7 +1925,6 @@ public class CallActivity extends Activity {
     return s.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
   }
 
-  /** P3: static — не держит ссылку на Activity, переживает её уничтожение. */
   private static class EngineWebViewClient extends WebViewClient {
 
     @Override
@@ -2036,7 +1965,6 @@ public class CallActivity extends Activity {
         if (l != null)
           l.log("→ JS: configureIceMode(" + modeName + ")");
 
-        // P1: setIncomingMode + offer — только после grant CAMERA/RECORD_AUDIO.
         onMediaPermissionsReady();
 
         sMainHandler.postDelayed(() -> flushPendingSignals(), 400);
@@ -2058,7 +1986,6 @@ public class CallActivity extends Activity {
     }
   }
 
-  /** P3: static — диалоги JS строим на живом sUi, иначе cancel (без утечки/краша). */
   private static class EngineWebChromeClient extends WebChromeClient {
 
     @Override
@@ -2123,7 +2050,7 @@ public class CallActivity extends Activity {
       sMainHandler.post(() -> {
         CallActivity ui = sUi;
         if (ui == null || ui.isFinishing() || ui.isDestroyed()) {
-          result.cancel(); // UI мёртв — диалог не показать, не падаем
+          result.cancel();
           return;
         }
         try {
@@ -2158,5 +2085,4 @@ public class CallActivity extends Activity {
       return true;
     }
   }
-
 }
