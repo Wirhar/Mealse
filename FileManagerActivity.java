@@ -68,6 +68,10 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import com.my.mealse.util.MealseLogger; // уже есть
+// новых импортов не требуется — ZipCompressor, LocalFileEntry, AttachmentInfo,
+// FileListAdapter, ArrayList, List уже импортированы
+
 import com.my.mealse.filemanager.util.ZipCompressor;
 
 /**
@@ -106,6 +110,9 @@ public class FileManagerActivity extends BaseActivity {
 
   private volatile boolean destroyed = false;
   private boolean pickMode = false;
+
+  // ★ НОВОЕ: список выбранных путей в pick-mode (мультивыбор файлов и папок).
+  public static final String EXTRA_PICKED_PATHS = "picked_paths";
 
   // ===== Views =====
   private Toolbar toolbar;
@@ -439,8 +446,11 @@ public class FileManagerActivity extends BaseActivity {
     listView.setOnItemLongClickListener((parent, view, position, id) -> {
       if (!isUiAlive())
         return false;
-      if (pickMode)
-        return false;
+      // ★ ИЗМЕНЕНО: в pick-mode long-press теперь ВКЛЮЧАЕТ мультивыбор
+      // (раньше — return false, и выбрать несколько файлов было нельзя).
+      // Одиночный тап по файлу в pick-mode по-прежнему возвращает его сразу
+      // (см. onFileClicked → pickFileAndFinish), а long-press → ActionMode
+      // с пунктами «✓ Выбрать» / «🗜 В ZIP».
       if (!listAdapter.isMultiSelectMode()) {
         startMultiSelect(position);
         return true;
@@ -2438,24 +2448,22 @@ public class FileManagerActivity extends BaseActivity {
 
     @Override
     public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
-      MenuItem paste = menu.findItem(R.id.fm_multi_paste);
-      if (paste != null)
-        paste.setVisible(!FileClipboard.isEmpty());
+      // ★ НОВОЕ: в pick-mode показываем ТОЛЬКО «✓ Выбрать» и «🗜 В ZIP»,
+      // все операции с файлами (copy/move/delete/download/compress/paste)
+      // скрываем — пользователь выбирает, а не управляет.
+      final boolean pick = pickMode;
 
-      MenuItem download = menu.findItem(R.id.fm_multi_download);
-      if (download != null) {
-        boolean isRemote = currentSource != null && currentSource.isRemote();
-        download.setVisible(isRemote);
-      }
-
-      // ★ НОВОЕ: «Сжатие» — только для локальных источников.
-      // Для удалённых узлов сжатие требовало бы серверной поддержки
-      // (RemoteFsService должен уметь стримить ZIP), сейчас не реализовано.
-      MenuItem compress = menu.findItem(R.id.fm_multi_compress);
-      if (compress != null) {
-        boolean isLocal = currentSource != null && currentSource.isLocal();
-        compress.setVisible(isLocal);
-      }
+      setVisible(menu, R.id.fm_multi_copy, !pick);
+      setVisible(menu, R.id.fm_multi_move, !pick);
+      setVisible(menu, R.id.fm_multi_delete, !pick);
+      setVisible(menu, R.id.fm_multi_download,
+          !pick && currentSource != null && currentSource.isRemote());
+      setVisible(menu, R.id.fm_multi_compress,
+          !pick && currentSource != null && currentSource.isLocal());
+      setVisible(menu, R.id.fm_multi_paste, !pick && !FileClipboard.isEmpty());
+      setVisible(menu, R.id.fm_multi_select_all, !pick); // ★ в pick-mode «Выбрать всё» не нужно
+      setVisible(menu, R.id.fm_multi_pick_done, pick);
+      setVisible(menu, R.id.fm_multi_pick_zip, pick);
       return true;
     }
 
@@ -2464,6 +2472,18 @@ public class FileManagerActivity extends BaseActivity {
       if (!isUiAlive())
         return false;
       int id = item.getItemId();
+
+      // ★ НОВОЕ (pick-mode): подтвердить выбор и вернуть пути в чат.
+      if (id == R.id.fm_multi_pick_done) {
+        pickReturnSelection(false);
+        mode.finish();
+        return true;
+      }
+      // ★ НОВОЕ (pick-mode): собрать выбранное в ОДИН zip и вернуть его в чат.
+      if (id == R.id.fm_multi_pick_zip) {
+        pickReturnSelection(true);
+        return true;
+      }
 
       if (id == R.id.fm_multi_select_all) {
         listAdapter.selectAll();
@@ -2516,6 +2536,10 @@ public class FileManagerActivity extends BaseActivity {
         return true;
       }
       // ★ НОВОЕ: сжатие выбранных файлов/папок в .zip.
+      // ★ НОВОЕ: сжатие выбранных файлов/папок в .zip.
+      // Метод askCompressSelected() объявлен в FileManagerActivity
+      // (вне MultiActionMode), поэтому вызов без квалификации корректен —
+      // Java ищет метод в enclosing-классе (FileManagerActivity).
       if (id == R.id.fm_multi_compress) {
         askCompressSelected();
         return true;
@@ -2534,76 +2558,6 @@ public class FileManagerActivity extends BaseActivity {
      *
      * Прогресс-диалог/toast/runOnUiThread переиспользуются через Ui-адаптер на существующих методах FileManagerActivity — без дублирования.
      */
-    private void askCompressSelected() {
-      if (!isUiAlive())
-        return;
-      if (currentSource == null || !currentSource.isLocal()) {
-        toast("Сжатие доступно только для локальных файлов");
-        return;
-      }
-      List<FileEntry> selected = listAdapter.getSelectedEntries();
-      if (selected.isEmpty()) {
-        toast("Не выбрано");
-        return;
-      }
-
-      List<File> files = new ArrayList<>();
-      for (FileEntry e : selected) {
-        if (e instanceof LocalFileEntry) {
-          files.add(((LocalFileEntry) e).getFile());
-        }
-      }
-      if (files.isEmpty()) {
-        toast("Нет локальных файлов для сжатия");
-        return;
-      }
-
-      File outDir = currentLocalDir;
-      if (outDir == null || !outDir.isDirectory()) {
-        toast("Папка недоступна");
-        return;
-      }
-
-      // ★ Адаптер переиспользует существующие прогресс-диалог/toast/runOnUiThread
-      // FileManagerActivity. Никаких новых полей/диалогов не создаём.
-      ZipCompressor.Ui ui = new ZipCompressor.Ui() {
-        @Override
-        public boolean isAlive() {
-          return isUiAlive();
-        }
-
-        @Override
-        public void showProgress(String t, String m, Runnable c) {
-          showProgressDialog(t, m, c);
-        }
-
-        @Override
-        public void updateProgress(long d, long t) {
-          updateProgressDialog(d, t);
-        }
-
-        @Override
-        public void dismissProgress() {
-          dismissProgressDialog();
-        }
-
-        @Override
-        public void toast(String m) {
-          FileManagerActivity.this.toast(m);
-        }
-
-        @Override
-        public void runOnUi(Runnable r) {
-          runOnUiThread(r);
-        }
-      };
-
-      ZipCompressor.showNameDialogAndCompress(this, files, outDir, ui, log, () -> {
-        if (actionMode != null)
-          actionMode.finish();
-        reloadCurrent();
-      });
-    }
 
     @Override
     public void onDestroyActionMode(ActionMode mode) {
@@ -2675,6 +2629,214 @@ public class FileManagerActivity extends BaseActivity {
     if (n > 0)
       toast("Запущено скачивание: " + n);
   }
+
+  /**
+   * ★ НОВОЕ: сжатие выбранных файлов/папок в отдельные .zip.
+   *
+   * Логика: 1. Проверка: только локальный источник (для удалённых — не поддерживается). 2. Собираем выбранные LocalFileEntry → File. 3. outDir = currentLocalDir (текущая папка). 4. Вызываем ZipCompressor.showNameDialogAndCompress(...) — диалог редактирования имён + фоновое сжатие с прогрессом/отменой. 5. По завершении — закрываем ActionMode и перезагружаем список.
+   *
+   * Прогресс-диалог/toast/runOnUiThread переиспользуются через Ui-адаптер на существующих методах FileManagerActivity — без дублирования.
+   *
+   * ★ ВАЖНО: метод объявлен в FileManagerActivity (уровень Activity), НЕ в MultiActionMode. Вызывается из MultiActionMode.onActionItemClicked без квалификации (enclosing class = FileManagerActivity).
+   */
+  private void askCompressSelected() {
+    if (!isUiAlive())
+      return;
+    if (currentSource == null || !currentSource.isLocal()) {
+      toast("Сжатие доступно только для локальных файлов");
+      return;
+    }
+    List<FileEntry> selected = listAdapter.getSelectedEntries();
+    if (selected.isEmpty()) {
+      toast("Не выбрано");
+      return;
+    }
+
+    List<File> files = new ArrayList<>();
+    for (FileEntry e : selected) {
+      if (e instanceof LocalFileEntry) {
+        files.add(((LocalFileEntry) e).getFile());
+      }
+    }
+    if (files.isEmpty()) {
+      toast("Нет локальных файлов для сжатия");
+      return;
+    }
+
+    File outDir = currentLocalDir;
+    if (outDir == null || !outDir.isDirectory()) {
+      toast("Папка недоступна");
+      return;
+    }
+
+    // ★ Адаптер переиспользует существующие прогресс-диалог/toast/runOnUiThread
+    // FileManagerActivity. Никаких новых полей/диалогов не создаём.
+    ZipCompressor.Ui ui = new ZipCompressor.Ui() {
+      @Override
+      public boolean isAlive() {
+        return isUiAlive();
+      }
+
+      @Override
+      public void showProgress(String t, String m, Runnable c) {
+        showProgressDialog(t, m, c);
+      }
+
+      @Override
+      public void updateProgress(long d, long t) {
+        updateProgressDialog(d, t);
+      }
+
+      @Override
+      public void dismissProgress() {
+        dismissProgressDialog();
+      }
+
+      @Override
+      public void toast(String m) {
+        // ★ ОБЯЗАТЕЛЬНО FileManagerActivity.this.toast(m):
+        // без квалификации компилятор разрешит в Ui.toast → рекурсия
+        // (StackOverflow) вместо ошибки компиляции. Это единственная
+        // квалификация, которая обязательна всегда — не «упрощайте».
+        FileManagerActivity.this.toast(m);
+      }
+
+      @Override
+      public void runOnUi(Runnable r) {
+        runOnUiThread(r);
+      }
+    };
+
+    // ★ this — FileManagerActivity (метод объявлен в FileManagerActivity,
+    // НЕ в MultiActionMode). FileManagerActivity.this оставлен для явности;
+    // можно заменить на this — оба варианта компилируются.
+    ZipCompressor.showNameDialogAndCompress(FileManagerActivity.this, files, outDir, ui, log,
+        () -> {
+          if (actionMode != null)
+            actionMode.finish();
+          reloadCurrent();
+        });
+  }
+
+  // ============================================================
+  // ★ НОВОЕ: pick-mode — мультивыбор файлов и папок
+  // ============================================================
+
+  /**
+   * Возврат выбранного в чат-вызывающий (ChatActivity/CallActivity).
+   *
+   * @param zip true → собрать ОДИН zip через ZipCompressor.compressSingle и вернуть его как единственный «файл»; false → вернуть все выбранные пути как есть (папки — папками).
+   *
+   *            Вызывается из MultiActionMode.onActionItemClicked по «✓ Выбрать» / «🗜 В ZIP». Завершает Activity через setResult(RESULT_OK, ...) + finish().
+   */
+  private void pickReturnSelection(boolean zip) {
+    if (!isUiAlive())
+      return;
+    List<FileEntry> selected = listAdapter.getSelectedEntries();
+    if (selected.isEmpty()) {
+      toast("Не выбрано");
+      return;
+    }
+
+    final List<File> files = new ArrayList<>();
+    for (FileEntry e : selected) {
+      if (e instanceof LocalFileEntry) {
+        files.add(((LocalFileEntry) e).getFile());
+      }
+    }
+    if (files.isEmpty()) {
+      toast("Нет локальных файлов для выбора");
+      return;
+    }
+
+    if (!zip) {
+      returnPickedPaths(files);
+      return;
+    }
+
+    // ★ ZIP-режим: собираем ОДИН архив через новый ZipCompressor.compressSingle.
+    // Имя по умолчанию = «archive» (один файл → его имя). sanitize добавит .zip.
+    File outDir = new File(getCacheDir(), "pick_zip");
+    if (!outDir.exists() && !outDir.mkdirs()) {
+      toast("Не удалось создать временную папку");
+      return;
+    }
+
+    ZipCompressor.Ui ui = new ZipCompressor.Ui() {
+      @Override
+      public boolean isAlive() {
+        return isUiAlive();
+      }
+
+      @Override
+      public void showProgress(String t, String m, Runnable c) {
+        showProgressDialog(t, m, c);
+      }
+
+      @Override
+      public void updateProgress(long d, long t) {
+        updateProgressDialog(d, t);
+      }
+
+      @Override
+      public void dismissProgress() {
+        dismissProgressDialog();
+      }
+
+      @Override
+      public void toast(String m) {
+        // ★ Обязательна квалификация FileManagerActivity.this.toast —
+        // иначе компилятор разрешит в Ui.toast → рекурсия.
+        FileManagerActivity.this.toast(m);
+      }
+
+      @Override
+      public void runOnUi(Runnable r) {
+        runOnUiThread(r);
+      }
+    };
+
+    ZipCompressor.showSingleZipDialogAndCompress(FileManagerActivity.this, files, outDir, ui, log,
+        zipFile -> {
+          java.util.ArrayList<File> one = new java.util.ArrayList<>();
+          one.add(zipFile);
+          returnPickedPaths(one);
+          if (actionMode != null)
+            actionMode.finish();
+        });
+  }
+
+  /**
+   * Возвращает пути в чат-вызывающий. Для обратной совместимости с одиночным pick-mode заполняет и старые extras (PATH/NAME/MIME/SIZE/IS_FOLDER) для первого элемента — старые ветки ChatActivity/CallActivity их ещё читают.
+   */
+  private void returnPickedPaths(List<File> files) {
+    try {
+      Intent r = new Intent();
+      ArrayList<String> paths = new ArrayList<>();
+      for (File f : files)
+        paths.add(f.getAbsolutePath());
+      r.putStringArrayListExtra(EXTRA_PICKED_PATHS, paths);
+
+      File first = files.get(0);
+      r.putExtra(EXTRA_PICKED_PATH, first.getAbsolutePath());
+      r.putExtra(EXTRA_PICKED_NAME, first.getName());
+      r.putExtra(EXTRA_PICKED_IS_FOLDER, first.isDirectory());
+      r.putExtra(EXTRA_PICKED_SIZE, first.length());
+      // ★ Обратная совместимость: старые ветки читают EXTRA_PICKED_MIME.
+      r.putExtra(EXTRA_PICKED_MIME, first.isDirectory() ? "resource/folder"
+          : AttachmentInfo.guessMimeByName(first.getName()));
+
+      setResult(RESULT_OK, r);
+      finish();
+    } catch (Exception e) {
+      log.logError("returnPickedPaths", e);
+      toast("Ошибка: " + e.getMessage());
+    }
+  }
+
+  /** ★ Хелпер видимости пунктов меню (если ещё не объявлен рядом с onPrepareOptionsMenu — уже есть). */
+  // private void setVisible(Menu menu, int itemId, boolean visible) { ... }
+  // (уже существует в файле — использовать его)
 
   // ============================================================
   // Поиск

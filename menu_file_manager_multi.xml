@@ -48,4 +48,25 @@
         android:icon="@drawable/ic_delete"
         app:showAsAction="ifRoom" />
 
+    <!-- ★ НОВОЕ (pick-mode): подтвердить выбор и вернуть пути в чат.
+         Видимость: только при pickMode == true (см. onPrepareActionMode).
+         По клику → pickReturnSelection(false) → returnPickedPaths → finish. -->
+    <item
+        android:id="@+id/fm_multi_pick_done"
+        android:title="✓ Выбрать"
+        android:icon="@drawable/ic_check"
+        app:showAsAction="ifRoom"
+        android:visible="false" />
+
+    <!-- ★ НОВОЕ (pick-mode): собрать выбранное в один ZIP и вернуть его в чат.
+         Видимость: только при pickMode == true (см. onPrepareActionMode).
+         По клику → pickReturnSelection(true) → ZipCompressor.showSingleZipDialogAndCompress
+         → возврат одного zip-файла в чат. -->
+    <item
+        android:id="@+id/fm_multi_pick_zip"
+        android:title="🗜 В ZIP"
+        android:icon="@drawable/ic_file_archive"
+        app:showAsAction="ifRoom"
+        android:visible="false" />
+
 </menu>

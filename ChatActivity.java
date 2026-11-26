@@ -45,10 +45,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import androidx.documentfile.provider.DocumentFile;
 import com.my.mealse.filemanager.ui.FileManagerActivity;
 
 /**
@@ -71,7 +71,6 @@ public class ChatActivity extends BaseActivity {
   private static final int PAGE_SIZE = 50;
 
   private static final int REQ_PICK_APP_MANAGER = 5010;
-  private static final int REQ_PICK_FILE = 5001;
   private static final int REQ_PICK_MEDIA = 5002;
   private static final int REQ_CAPTURE_PHOTO = 5003;
   private static final int REQ_CAPTURE_VIDEO = 5004;
@@ -159,53 +158,43 @@ public class ChatActivity extends BaseActivity {
 
     if (resultCode != RESULT_OK) {
       if (requestCode == REQ_CAPTURE_PHOTO || requestCode == REQ_CAPTURE_VIDEO) {
-        if (pendingCameraFile != null && pendingCameraFile.exists()) {
-          pendingCameraFile.delete();
+        // ★ MIUI/HyperOS иногда возвращают RESULT_CANCELED, хотя файл снят.
+        // Если pendingCameraFile существует и непуст — обрабатываем как успех.
+        if (pendingCameraFile != null && pendingCameraFile.exists()
+            && pendingCameraFile.length() > 0) {
+          log.log("onActivityResult: RESULT_CANCELED, но файл есть — обрабатываю");
+          handleCapturedFile();
+        } else {
+          if (pendingCameraFile != null && pendingCameraFile.exists()) {
+            pendingCameraFile.delete();
+          }
+          pendingCameraFile = null;
+          pendingCameraUri = null;
         }
-        pendingCameraFile = null;
-        pendingCameraUri = null;
       }
       return;
     }
 
+    // ★ Внутренний менеджер: мультивыбор (файлы + папки), fallback на одиночный путь.
     if (requestCode == REQ_PICK_APP_MANAGER && data != null) {
-      // существующая логика (pick файла через FileManagerActivity)
-      String path = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_PATH);
-      String name = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_NAME);
-      String mime = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_MIME);
-      long size = data.getLongExtra(FileManagerActivity.EXTRA_PICKED_SIZE, 0);
-      if (path == null || path.isEmpty()) {
-        toast("Файл не выбран");
+      ArrayList<String> paths = data
+          .getStringArrayListExtra(FileManagerActivity.EXTRA_PICKED_PATHS);
+      if (paths == null || paths.isEmpty()) {
+        String p = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_PATH);
+        if (p != null && !p.isEmpty()) {
+          paths = new ArrayList<>();
+          paths.add(p);
+        }
+      }
+      if (paths == null || paths.isEmpty()) {
+        toast("Ничего не выбрано");
         return;
       }
-      handlePickedPath(path, name, mime, size);
-      return;
-    }
-
-    if (requestCode == REQ_PICK_FOLDER && data != null) {
-      String path = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_PATH);
-      String name = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_NAME);
-      if (path == null || path.isEmpty()) {
-        toast("Папка не выбрана");
-        return;
-      }
-      handlePickedFolderPath(path, name);
-      return;
-    }
-
-    if (requestCode == REQ_PICK_FOLDER && data != null) {
-      String path = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_PATH);
-      String name = data.getStringExtra(FileManagerActivity.EXTRA_PICKED_NAME);
-      if (path == null || path.isEmpty()) {
-        toast("Папка не выбрана");
-        return;
-      }
-      handlePickedFolderPathForChat(path, name);
+      handlePickedPaths(paths);
       return;
     }
 
     switch (requestCode) {
-      case REQ_PICK_FILE:
       case REQ_PICK_MEDIA:
         if (data != null && data.getData() != null) {
           handlePickedUri(data.getData());
@@ -218,44 +207,101 @@ public class ChatActivity extends BaseActivity {
     }
   }
 
-  // ============================================================
-  // Обработчики выбранных/снятых файлов
-  // ============================================================
-
-  private void handlePickedFolderPathForChat(String folderPath, String displayName) {
+  /**
+   * ★ НОВОЕ: обработка множественного выбора из внутреннего менеджера. Папки пакуются существующим AttachmentStorage.zipDirectory; файлы шлются как есть. Батч: «тихая» отправка каждого элемента, в конце — один тост и один reload.
+   */
+  private void handlePickedPaths(List<String> paths) {
     if (conversationId == null) {
       toast("Чат ещё не готов");
       return;
     }
     executor.execute(() -> {
-      try {
-        File srcDir = new File(folderPath);
-        if (!srcDir.isDirectory()) {
-          ui.post(() -> toast("Не папка"));
-          return;
+      int sent = 0, failed = 0;
+      for (String p : paths) {
+        File f = new File(p);
+        if (!f.exists()) {
+          failed++;
+          continue;
         }
-        File zip = AttachmentStorage.zipDirectory(this, srcDir);
-        if (zip == null) {
-          ui.post(() -> toast("Не удалось упаковать папку"));
-          return;
+        try {
+          if (f.isDirectory()) {
+            File zip = AttachmentStorage.zipDirectory(this, f);
+            if (zip == null || zip.length() > MessageCommands.MAX_ATTACHMENT_BYTES) {
+              if (zip != null)
+                zip.delete();
+              failed++;
+              continue;
+            }
+            AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(), f.getName() + ".zip",
+                "application/zip", zip.length());
+            // ★ deleteSrc=false: владелец очистки — этот код (см. ниже),
+            // а не sendAttachmentCore. sendFile копирует СИНХРОННО, поэтому
+            // удалять zip можно сразу после возврата.
+            boolean ok = sendAttachmentCore(info, zip, false);
+            if (ok)
+              sent++;
+            else
+              failed++;
+            // ★ Безусловное удаление: cache-guard внутри core мог не сработать,
+            // если AttachmentStorage.zipDirectory кладёт zip вне getCacheDir().
+            // Иначе временный архив остаётся навсегда → утечка места.
+            if (zip.exists())
+              zip.delete();
+          } else {
+            long size = f.length();
+            if (size <= 0 || size > MessageCommands.MAX_ATTACHMENT_BYTES) {
+              failed++;
+              continue;
+            }
+            AttachmentInfo info = new AttachmentInfo(f.getAbsolutePath(), f.getName(),
+                AttachmentInfo.guessMimeByName(f.getName()), size);
+            if (sendAttachmentCore(info, f, false))
+              sent++;
+            else
+              failed++;
+          }
+        } catch (Exception e) {
+          log.logError("handlePickedPaths", e);
+          failed++;
         }
-        long size = zip.length();
-        if (size > MessageCommands.MAX_ATTACHMENT_BYTES) {
-          zip.delete();
-          ui.post(() -> toast("Папка слишком большая (" + AttachmentInfo.formatSize(size)
-              + " > " + AttachmentInfo.formatSize(MessageCommands.MAX_ATTACHMENT_BYTES) + ")"));
-          return;
-        }
-        AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(),
-            (displayName != null ? displayName : srcDir.getName()) + ".zip", "application/zip",
-            size);
-        sendAttachment(info, zip, true);
-      } catch (Exception e) {
-        log.logError("handlePickedFolderPathForChat", e);
-        ui.post(() -> toast("Ошибка: " + e.getMessage()));
       }
+      final int fs = sent, ff = failed;
+      ui.post(() -> {
+        toast("📎 Отправлено: " + fs + (ff > 0 ? ", ошибок: " + ff : ""));
+        reloadFirstPage();
+      });
     });
   }
+
+  /** «Тихая» отправка без тоста/reload — для батча. Возвращает успех. */
+  /**
+   * «Тихая» отправка без тоста/reload — для батча. Возвращает успех.
+   *
+   * ★ Guard: conversationId == null → ранний выход с логом (симметрия с CallActivity.sendAttachmentCore). MessageCommands.sendFile сам возвращает null при пустом conversationId, так что это не NPE-фикс, а явный лог причины и отсутствие лишней работы. ★ deleteSrc: удаляем src, только если он в getCacheDir() (для tmp галереи/камеры из одиночных путей). Для zip, собранных в батче, вызывающий код (handlePickedPaths) удаляет файл сам, безусловно.
+   */
+  private boolean sendAttachmentCore(AttachmentInfo info, File src, boolean deleteSrc) {
+    if (conversationId == null) {
+      log.warn("sendAttachmentCore: conversationId == null — пропуск");
+      return false;
+    }
+    try {
+      String id = MessageCommands.sendFile(this, conversationId, info);
+      if (id == null)
+        return false;
+      if (deleteSrc && src != null && src.exists()
+          && src.getAbsolutePath().startsWith(getCacheDir().getAbsolutePath())) {
+        src.delete();
+      }
+      return true;
+    } catch (Exception e) {
+      log.logError("sendAttachmentCore", e);
+      return false;
+    }
+  }
+
+  // ============================================================
+  // Обработчики выбранных/снятых файлов
+  // ============================================================
 
   private void handlePickedUri(Uri uri) {
     executor.execute(() -> {
@@ -296,90 +342,6 @@ public class ChatActivity extends BaseActivity {
     });
   }
 
-  /** ★ НОВОЕ: копирует выбранную папку во временную директорию, пакует в zip, отправляет. */
-  private void handlePickedFolder(Uri treeUri) {
-    executor.execute(() -> {
-      try {
-        // 1. Копируем дерево во временную папку
-        File tmpDir = new File(getCacheDir(), "folder_pick_" + System.currentTimeMillis());
-        if (!tmpDir.mkdirs())
-          throw new IOException("mkdirs failed");
-        String displayName = queryDisplayName(treeUri);
-        if (displayName == null || displayName.isEmpty())
-          displayName = "folder";
-        copyTreeToDir(treeUri, tmpDir);
-        // 2. Пакуем в zip
-        File zip = AttachmentStorage.zipDirectory(this, tmpDir);
-        if (zip == null) {
-          deleteRecursive(tmpDir);
-          ui.post(() -> toast("Не удалось упаковать папку"));
-          return;
-        }
-        long size = zip.length();
-        if (size > MessageCommands.MAX_ATTACHMENT_BYTES) {
-          zip.delete();
-          deleteRecursive(tmpDir);
-          ui.post(() -> toast("Папка слишком большая (" + AttachmentInfo.formatSize(size) + " > "
-              + AttachmentInfo.formatSize(MessageCommands.MAX_ATTACHMENT_BYTES) + ")"));
-          return;
-        }
-        AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(), displayName + ".zip",
-            "application/zip", size);
-        // 3. Отправляем
-        sendAttachment(info, zip, true); // zip — удалить после
-        deleteRecursive(tmpDir);
-      } catch (Exception e) {
-        log.logError("handlePickedFolder", e);
-        ui.post(() -> toast("Ошибка: " + e.getMessage()));
-      }
-    });
-  }
-
-  private void copyTreeToDir(Uri treeUri, File destDir) throws IOException {
-    androidx.documentfile.provider.DocumentFile tree = androidx.documentfile.provider.DocumentFile
-        .fromTreeUri(this, treeUri);
-    if (tree == null)
-      throw new IOException("DocumentFile.fromTreeUri == null");
-    copyDocumentFile(tree, destDir);
-  }
-
-  private void copyDocumentFile(androidx.documentfile.provider.DocumentFile src, File destDir)
-      throws IOException {
-    if (src == null)
-      return;
-    if (src.isDirectory()) {
-      File subDir = new File(destDir, src.getName());
-      if (!subDir.exists() && !subDir.mkdirs())
-        throw new IOException("mkdirs " + subDir);
-      for (androidx.documentfile.provider.DocumentFile child : src.listFiles()) {
-        copyDocumentFile(child, subDir);
-      }
-    } else {
-      File out = new File(destDir, src.getName());
-      try (InputStream in = getContentResolver().openInputStream(src.getUri());
-          OutputStream os = new FileOutputStream(out)) {
-        if (in == null)
-          throw new IOException("null input for " + src.getUri());
-        byte[] buf = new byte[64 * 1024];
-        int r;
-        while ((r = in.read(buf)) != -1)
-          os.write(buf, 0, r);
-      }
-    }
-  }
-
-  private static void deleteRecursive(File f) {
-    if (f == null)
-      return;
-    if (f.isDirectory()) {
-      File[] kids = f.listFiles();
-      if (kids != null)
-        for (File k : kids)
-          deleteRecursive(k);
-    }
-    f.delete();
-  }
-
   private void handleCapturedFile() {
     File f = pendingCameraFile;
     pendingCameraFile = null;
@@ -406,36 +368,6 @@ public class ChatActivity extends BaseActivity {
     AttachmentInfo info = new AttachmentInfo(f.getAbsolutePath(), f.getName(), mime, size);
     // Файл уже в messenger/attachments/<convId>/ — не удалять после отправки
     sendAttachment(info, f, false);
-  }
-
-  private void handlePickedPath(String path, String name, String mime, long size) {
-    executor.execute(() -> {
-      try {
-        File src = new File(path);
-        if (!src.exists() || !src.isFile()) {
-          ui.post(() -> toast("Файл недоступен"));
-          return;
-        }
-        long actualSize = src.length();
-        if (actualSize <= 0) {
-          ui.post(() -> toast("Пустой файл"));
-          return;
-        }
-        if (actualSize > MessageCommands.MAX_ATTACHMENT_BYTES) {
-          ui.post(() -> toast("Файл слишком большой (" + AttachmentInfo.formatSize(actualSize)
-              + " > " + AttachmentInfo.formatSize(MessageCommands.MAX_ATTACHMENT_BYTES) + ")"));
-          return;
-        }
-        AttachmentInfo info = new AttachmentInfo(src.getAbsolutePath(),
-            name != null ? name : src.getName(),
-            mime != null ? mime : AttachmentInfo.guessMimeByName(src.getName()), actualSize);
-        // Внешний файл — не удалять после отправки
-        sendAttachment(info, src, false);
-      } catch (Exception e) {
-        log.logError("handlePickedPath", e);
-        ui.post(() -> toast("Ошибка: " + e.getMessage()));
-      }
-    });
   }
 
   /**
@@ -848,94 +780,26 @@ public class ChatActivity extends BaseActivity {
   // ============================================================
 
   private void showAttachDialog() {
-    String[] options = { "📁 Файл (системный проводник)", "📦 Приложение (внутренний менеджер)",
-        "🖼 Галерея (фото/видео)", "📷 Фото с камеры", "🎥 Видео с камеры", "🗂 Папку (zip)" // ★ НОВОЕ
-    };
+    String[] options = { "📷 Фото с камеры", "🎥 Видео с камеры", "🖼 Галерея (фото/видео)",
+        "📦 Внутренний менеджер" };
     new AlertDialog.Builder(this).setTitle("Прикрепить").setItems(options, (d, w) -> {
       switch (w) {
         case 0:
-          pickFile();
+          capturePhoto();
           break;
         case 1:
-          pickFromAppManager();
+          captureVideo();
           break;
         case 2:
           pickMedia();
           break;
         case 3:
-          capturePhoto();
+          pickFromAppManager();
           break;
-        case 4:
-          captureVideo();
-          break;
-        case 5:
-          pickFolder();
-          break; // ★ НОВОЕ
       }
     }).setNegativeButton("Отмена", null).show();
   }
-
-  /** ★ НОВОЕ: выбор папки через SAF (ACTION_OPEN_DOCUMENT_TREE). */
-  private static final int REQ_PICK_FOLDER = 5005;
-
-  /**
-   * ★ ИЗМЕНЕНО: открываем внутренний FileManagerActivity вместо ACTION_OPEN_DOCUMENT_TREE. Убирает SecurityException при copyDocumentFile (SAF-разрешение отзывается после одного вызова).
-   */
-  private void pickFolder() {
-    try {
-      Intent i = new Intent(this, com.my.mealse.filemanager.ui.FileManagerActivity.class);
-      i.putExtra(FileManagerActivity.EXTRA_PICK_MODE, true);
-      i.putExtra(FileManagerActivity.EXTRA_PICK_MODE_FOLDER, true);
-      startActivityForResult(i, REQ_PICK_FOLDER);
-    } catch (Exception e) {
-      toast("Не удалось открыть файловый менеджер: " + e.getMessage());
-    }
-  }
-
-  /** ★ НОВОЕ: обработка результата из FileManagerActivity (pick-mode-folder). */
-  private void handlePickedFolderPath(String folderPath, String displayName) {
-    executor.execute(() -> {
-      try {
-        File srcDir = new File(folderPath);
-        if (!srcDir.exists() || !srcDir.isDirectory()) {
-          ui.post(() -> toast("Не папка: " + folderPath));
-          return;
-        }
-        File zip = AttachmentStorage.zipDirectory(this, srcDir);
-        if (zip == null) {
-          ui.post(() -> toast("Не удалось упаковать папку"));
-          return;
-        }
-        long size = zip.length();
-        if (size > MessageCommands.MAX_ATTACHMENT_BYTES) {
-          zip.delete();
-          ui.post(() -> toast("Папка слишком большая (" + AttachmentInfo.formatSize(size) + " > "
-              + AttachmentInfo.formatSize(MessageCommands.MAX_ATTACHMENT_BYTES) + ")"));
-          return;
-        }
-        AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(),
-            (displayName != null ? displayName : srcDir.getName()) + ".zip", "application/zip",
-            size);
-        sendAttachment(info, zip, true);
-      } catch (Exception e) {
-        log.logError("handlePickedFolderPath", e);
-        ui.post(() -> toast("Ошибка: " + e.getMessage()));
-      }
-    });
-  }
   
-  
-  private void pickFile() {
-    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-    i.addCategory(Intent.CATEGORY_OPENABLE);
-    i.setType("*/*");
-    try {
-      startActivityForResult(i, REQ_PICK_FILE);
-    } catch (Exception e) {
-      toast("Не удалось открыть проводник: " + e.getMessage());
-    }
-  }
-
   private void pickFromAppManager() {
     try {
       Intent i = new Intent(this, com.my.mealse.filemanager.ui.FileManagerActivity.class);

@@ -47,6 +47,16 @@ import java.util.zip.ZipOutputStream;
  *    entry ещё не открыт, .part удалится в catch compressAsync.
  *  - entryPath.isEmpty() → "root" (защита от пустого имени).
  *  - Удалены unused TAG, topSrc, idx (ревью #8/23/24/25).
+ *
+ * ★ НОВОЕ (единый ZIP для мультивыбора в pick-mode):
+ *  - showSingleZipDialogAndCompress(...) / compressSingle(...) — собирают ОДИН
+ *    архив из всех выбранных файлов и папок. Используется из FileManagerActivity
+ *    в pick-mode, когда пользователь нажимает «🗜 В ZIP».
+ *  - Переиспользуют те же приватные addRecursive / uniqueTarget / sanitize /
+ *    sumSize / deleteQuietly / closeQuietly / BUF, что и compressAsync —
+ *    дублирования логики ZIP нет.
+ *  - Сигнатура addRecursive сохранена как в применённой версии (8 параметров,
+ *    без topSrc) — новый код вызывает её без изменений.
  */
 public final class ZipCompressor {
 
@@ -60,6 +70,11 @@ public final class ZipCompressor {
     void dismissProgress();
     void toast(String msg);
     void runOnUi(Runnable r);
+  }
+
+  /** ★ НОВОЕ: колбэк «один архив готов» — используется pick-mode в менеджере. */
+  public interface SingleResult {
+    void onZip(File zip);
   }
 
   private ZipCompressor() {}
@@ -126,7 +141,7 @@ public final class ZipCompressor {
   }
 
   // ============================================================
-  // Фоновое сжатие
+  // Фоновое сжатие (несколько архивов — по одному на элемент)
   // ============================================================
 
   public static void compressAsync(List<File> sources, List<String> names, File outDir,
@@ -206,6 +221,132 @@ public final class ZipCompressor {
         if (onDone != null) onDone.run();
       });
     }, "ZipCompressor").start();
+  }
+
+  // ============================================================
+  // ★ НОВОЕ: ОДИН архив на весь выбор (pick-mode)
+  // ============================================================
+
+  /**
+   * Показывает диалог ввода имени и запускает сжатие всех sources в ОДИН zip.
+   * Используется из FileManagerActivity в pick-mode («🗜 В ZIP»).
+   *
+   * @param act     Activity для диалога
+   * @param sources выбранные файлы/папки (порядок сохраняется в архиве)
+   * @param outDir  каталог, куда положить .zip
+   * @param ui      мост к UI (прогресс/toast)
+   * @param log     логгер (может быть null)
+   * @param onZip   колбэк с готовым File (на UI-потоке). null допустим.
+   */
+  public static void showSingleZipDialogAndCompress(Activity act, List<File> sources,
+      File outDir, Ui ui, MealseLogger log, SingleResult onZip) {
+    if (act == null || sources == null || sources.isEmpty() || outDir == null) return;
+
+    EditText et = new EditText(act);
+    et.setSingleLine(true);
+    // ★ Имя по умолчанию: если один источник — «имя_источника.zip»,
+    // иначе — «archive.zip». sanitize добавит .zip, если его нет.
+    String def;
+    if (sources.size() == 1) {
+      File only = sources.get(0);
+      String n = only.getName();
+      def = (n == null || n.isEmpty()) ? "archive" : n;
+    } else {
+      def = "archive";
+    }
+    et.setText(def);
+    et.setSelection(0, def.length());
+
+    int pad = dp(act, 16);
+    FrameLayout wrap = new FrameLayout(act);
+    wrap.setPadding(pad, pad, pad, pad);
+    wrap.addView(et, new FrameLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+    new AlertDialog.Builder(act)
+        .setTitle("ZIP-архив (" + sources.size() + ")")
+        .setView(wrap)
+        .setPositiveButton("Сжать", (d, w) -> {
+          String name = et.getText().toString().trim();
+          if (TextUtils.isEmpty(name)) name = def;
+          name = sanitize(name);   // ★ .zip добавляется внутри
+          compressSingle(sources, name, outDir, ui, log, onZip);
+        })
+        .setNegativeButton("Отмена", null)
+        .show();
+  }
+
+  /**
+   * Сжимает все sources в ОДИН zip-файл name внутри outDir.
+   * Асинхронно, с прогрессом через Ui. По завершении вызывает onZip на UI-потоке.
+   *
+   * ★ Переиспользует приватные addRecursive / uniqueTarget / sumSize /
+   * deleteQuietly / closeQuietly / BUF — та же ZIP-логика, что и в compressAsync.
+   * ★ Сигнатура addRecursive — как в применённой версии (8 параметров, без topSrc).
+   */
+  public static void compressSingle(List<File> sources, String name, File outDir,
+      Ui ui, MealseLogger log, SingleResult onZip) {
+    if (sources == null || sources.isEmpty() || outDir == null) return;
+    final AtomicBoolean cancelled = new AtomicBoolean(false);
+    final long total = sumSize(sources);
+    final String safeName = sanitize(name);
+
+    ui.runOnUi(() -> {
+      if (ui.isAlive())
+        ui.showProgress("Сжатие", "Подготовка…", () -> cancelled.set(true));
+    });
+
+    new Thread(() -> {
+      File target = uniqueTarget(outDir, safeName);
+      File part = new File(target.getAbsolutePath() + ".part");
+      long[] done = {0};
+      long[] lastReport = {0};
+      boolean ok = false;
+
+      ZipOutputStream zos = null;
+      try {
+        zos = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(part), BUF));
+        for (File src : sources) {
+          if (cancelled.get()) break;
+          addRecursive(zos, src, src.getName(), target,
+              done, total, ui, cancelled, lastReport);
+        }
+        if (!cancelled.get()) {
+          zos.finish();
+          zos.flush();
+        }
+      } catch (Throwable t) {
+        if (log != null) log.logError("compressSingle", t);
+        deleteQuietly(part);
+      } finally {
+        closeQuietly(zos);
+        zos = null;
+      }
+
+      if (!cancelled.get()) {
+        if (target.exists()) deleteQuietly(target);
+        ok = part.renameTo(target);
+        if (!ok) deleteQuietly(part);
+      } else {
+        deleteQuietly(part);
+      }
+
+      final boolean fok = ok;
+      final boolean wasCancelled = cancelled.get();
+      final File fTarget = target;
+      ui.runOnUi(() -> {
+        if (!ui.isAlive()) return;
+        ui.dismissProgress();
+        if (wasCancelled) {
+          ui.toast("Сжатие отменено");
+        } else if (!fok) {
+          ui.toast("❌ Ошибка сжатия");
+        } else {
+          ui.toast("✅ ZIP создан");
+          if (onZip != null) onZip.onZip(fTarget);
+        }
+      });
+    }, "ZipSingle").start();
   }
 
   // ============================================================

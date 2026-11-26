@@ -49,6 +49,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
 
+import android.provider.MediaStore;
+import androidx.core.content.FileProvider;
+import com.my.mealse.messenger.storage.AttachmentStorage;
+
 /**
  * CallActivity — экран звонка (WebRTC внутри WebView) + оверлей чата.
  *
@@ -76,8 +80,14 @@ public class CallActivity extends Activity {
 
   // ★ Request codes для вложений в чате звонка (pick-mode FileManagerActivity / SAF)
   private static final int REQ_PICK_APP_MANAGER = 5010;
-  private static final int REQ_PICK_FILE = 5001;
+  // private static final int REQ_PICK_FILE = 5001;
   private static final int REQ_PICK_MEDIA = 5002;
+
+  private static final int REQ_CAPTURE_PHOTO = 5003;
+  private static final int REQ_CAPTURE_VIDEO = 5004;
+
+  private Uri pendingCameraUri;
+  private File pendingCameraFile;
 
   // ============================================================================
   // RETained Call Engine (static, переживает пересоздание Activity)
@@ -127,14 +137,9 @@ public class CallActivity extends Activity {
   /**
    * ★ НОВОЕ (замечание 2): targetNodeId в static-поле.
    *
-   * Раньше targetNodeId — instance-поле. При reuse-ветке onCreate
-   * (пересоздание Activity) он читался из intent; если intent без
-   * "target_node_id" (запуск из уведомления) — терялся. При автосбросе
-   * CallStateManager (heartbeat > 15 с) getActiveTargetNode() = null
-   * → флаг переустанавливался с null.
+   * Раньше targetNodeId — instance-поле. При reuse-ветке onCreate (пересоздание Activity) он читался из intent; если intent без "target_node_id" (запуск из уведомления) — терялся. При автосбросе CallStateManager (heartbeat > 15 с) getActiveTargetNode() = null → флаг переустанавливался с null.
    *
-   * Теперь sTargetNodeId переживает reuse и автосброс. startCallServiceIfPermitted
-   * передаёт его в CallService → ensureCallActive не теряет данные узла.
+   * Теперь sTargetNodeId переживает reuse и автосброс. startCallServiceIfPermitted передаёт его в CallService → ensureCallActive не теряет данные узла.
    */
   private static volatile String sTargetNodeId;
 
@@ -273,8 +278,7 @@ public class CallActivity extends Activity {
   private static volatile boolean sCallServiceStarted = false;
 
   /**
-   * ★ P0 (BUG-CA6): OnBackInvokedCallback для API 33+.
-   * Регистрируется в onCreate ДО развилки reuse/new.
+   * ★ P0 (BUG-CA6): OnBackInvokedCallback для API 33+. Регистрируется в onCreate ДО развилки reuse/new.
    */
   private android.window.OnBackInvokedCallback backInvokedCallback;
 
@@ -564,8 +568,7 @@ public class CallActivity extends Activity {
   }
 
   /**
-   * ★ ИЗМЕНЕНО (замечание 2): передаём sTargetNodeId в CallService.
-   * Чтобы ensureCallActive не терял данные узла при автосбросе.
+   * ★ ИЗМЕНЕНО (замечание 2): передаём sTargetNodeId в CallService. Чтобы ensureCallActive не терял данные узла при автосбросе.
    */
   private static void startCallServiceIfPermitted() {
     if (sCallEnded || sCallId == null || sAppCtx == null)
@@ -1091,7 +1094,7 @@ public class CallActivity extends Activity {
       sCallId = null;
       sTargetIp = null;
       sTargetFingerprint = null;
-      sTargetNodeId = null;   // ★ НОВОЕ (замечание 2): сброс
+      sTargetNodeId = null; // ★ НОВОЕ (замечание 2): сброс
       sIncomingOfferJson = null;
       sIsIncoming = false;
       sIsWifiDirectMode = false;
@@ -1514,38 +1517,105 @@ public class CallActivity extends Activity {
       Toast.makeText(this, "Чат ещё не готов", Toast.LENGTH_SHORT).show();
       return;
     }
-    final CharSequence[] items = { "📦 Файловый менеджер Mealse", "📄 Системный файл (любой)",
-        "🖼 Медиа (фото/видео/аудио)" };
+    final CharSequence[] items = { "📷 Фото с камеры", "🎥 Видео с камеры",
+        "🖼 Галерея (фото/видео)", "📦 Внутренний менеджер" };
     new android.app.AlertDialog.Builder(this).setTitle("Прикрепить")
         .setItems(items, (dialog, which) -> {
           try {
             switch (which) {
-              case 0: {
-                Intent i = new Intent(this, com.my.mealse.filemanager.ui.FileManagerActivity.class);
-                i.putExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICK_MODE, true);
-                startActivityForResult(i, REQ_PICK_APP_MANAGER);
+              case 0:
+                capturePhoto();
                 break;
-              }
-              case 1: {
-                Intent f = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                f.addCategory(Intent.CATEGORY_OPENABLE);
-                f.setType("*/*");
-                startActivityForResult(f, REQ_PICK_FILE);
+              case 1:
+                captureVideo();
                 break;
-              }
-              case 2: {
-                Intent m = new Intent(Intent.ACTION_GET_CONTENT);
-                m.setType("*/*");
-                m.putExtra(Intent.EXTRA_MIME_TYPES,
-                    new String[] { "image/*", "video/*", "audio/*" });
-                startActivityForResult(m, REQ_PICK_MEDIA);
+              case 2:
+                pickMedia();
                 break;
-              }
+              case 3:
+                pickFromAppManager();
+                break;
             }
           } catch (Exception e) {
             logError("showAttachSourceDialog", e);
           }
         }).setNegativeButton("Отмена", null).show();
+  }
+
+  private void pickFromAppManager() {
+    Intent i = new Intent(this, com.my.mealse.filemanager.ui.FileManagerActivity.class);
+    i.putExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICK_MODE, true);
+    startActivityForResult(i, REQ_PICK_APP_MANAGER);
+  }
+
+  private void pickMedia() {
+    Intent m = new Intent(Intent.ACTION_GET_CONTENT);
+    m.addCategory(Intent.CATEGORY_OPENABLE);
+    m.setType("*/*");
+    m.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "image/*", "video/*" });
+    startActivityForResult(m, REQ_PICK_MEDIA);
+  }
+
+  private void capturePhoto() {
+    if (conversationId == null) {
+      toast("Чат не готов");
+      return;
+    }
+    try {
+      File dir = AttachmentStorage.getConversationDir(this, conversationId);
+      pendingCameraFile = new File(dir, "photo_" + System.currentTimeMillis() + ".jpg");
+      pendingCameraUri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider",
+          pendingCameraFile);
+      Intent i = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+      i.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraUri);
+      i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+      startActivityForResult(i, REQ_CAPTURE_PHOTO);
+    } catch (Exception e) {
+      toast("Не удалось открыть камеру: " + e.getMessage());
+    }
+  }
+
+  private void captureVideo() {
+    if (conversationId == null) {
+      toast("Чат не готов");
+      return;
+    }
+    try {
+      File dir = AttachmentStorage.getConversationDir(this, conversationId);
+      pendingCameraFile = new File(dir, "video_" + System.currentTimeMillis() + ".mp4");
+      pendingCameraUri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider",
+          pendingCameraFile);
+      Intent i = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+      i.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraUri);
+      i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+      startActivityForResult(i, REQ_CAPTURE_VIDEO);
+    } catch (Exception e) {
+      toast("Не удалось открыть камеру: " + e.getMessage());
+    }
+  }
+
+  private void handleCapturedFile() {
+    File f = pendingCameraFile;
+    pendingCameraFile = null;
+    pendingCameraUri = null;
+    if (f == null || !f.exists()) {
+      toast("Файл не создан");
+      return;
+    }
+    long size = f.length();
+    if (size <= 0) {
+      f.delete();
+      toast("Пустой файл");
+      return;
+    }
+    if (size > MessageCommands.MAX_ATTACHMENT_BYTES) {
+      f.delete();
+      toast("Файл слишком большой");
+      return;
+    }
+    AttachmentInfo info = new AttachmentInfo(f.getAbsolutePath(), f.getName(),
+        AttachmentInfo.guessMimeByName(f.getName()), size);
+    sendAttachmentToChat(info, f, false);
   }
 
   private void initCallConversation() {
@@ -1733,65 +1803,141 @@ public class CallActivity extends Activity {
   @Override
   protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     super.onActivityResult(requestCode, resultCode, data);
-    if (resultCode != RESULT_OK)
+    if (resultCode != RESULT_OK) {
+      if (requestCode == REQ_CAPTURE_PHOTO || requestCode == REQ_CAPTURE_VIDEO) {
+        // ★ MIUI/HyperOS иногда возвращают RESULT_CANCELED, хотя файл снят.
+        // Если pendingCameraFile существует и непуст — обрабатываем как успех,
+        // иначе теряем снимок на багованных прошивках.
+        if (pendingCameraFile != null && pendingCameraFile.exists()
+            && pendingCameraFile.length() > 0) {
+          log.log("onActivityResult: RESULT_CANCELED, но файл есть — обрабатываю");
+          handleCapturedFile();
+        } else {
+          if (pendingCameraFile != null && pendingCameraFile.exists())
+            pendingCameraFile.delete();
+          pendingCameraFile = null;
+          pendingCameraUri = null;
+        }
+      }
       return;
+    }
 
     if (requestCode == REQ_PICK_APP_MANAGER && data != null) {
-      String path = data
-          .getStringExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICKED_PATH);
-      String name = data
-          .getStringExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICKED_NAME);
-      String mime = data
-          .getStringExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICKED_MIME);
-      long size = data
-          .getLongExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICKED_SIZE, 0);
-      if (path == null || path.isEmpty()) {
-        toast("Файл не выбран");
+      ArrayList<String> paths = data.getStringArrayListExtra(
+          com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICKED_PATHS);
+      if (paths == null || paths.isEmpty()) {
+        String p = data
+            .getStringExtra(com.my.mealse.filemanager.ui.FileManagerActivity.EXTRA_PICKED_PATH);
+        if (p != null) {
+          paths = new ArrayList<>();
+          paths.add(p);
+        }
+      }
+      if (paths == null || paths.isEmpty()) {
+        toast("Ничего не выбрано");
         return;
       }
-      handlePickedPathForChat(path, name, mime, size);
+      handlePickedPaths(paths);
       return;
     }
 
     switch (requestCode) {
-      case REQ_PICK_FILE:
       case REQ_PICK_MEDIA:
-        if (data != null && data.getData() != null) {
+        if (data != null && data.getData() != null)
           handlePickedUriForChat(data.getData());
-        }
+        break;
+      case REQ_CAPTURE_PHOTO:
+      case REQ_CAPTURE_VIDEO:
+        handleCapturedFile();
         break;
     }
   }
 
-  private void handlePickedPathForChat(String path, String name, String mime, long size) {
+  /** «Тихая» отправка без тоста/reload — для батча. */
+  // ★ УДАЛЕНО: REQ_PICK_FILE больше не используется — SAF-выбор файла убран,
+  // остался только внутренний менеджер (REQ_PICK_APP_MANAGER).
+
+  /** «Тихая» отправка без тоста/reload — для батча. */
+  /**
+   * «Тихая» отправка без тоста/reload — для батча.
+   *
+   * ★ Guard: conversationId == null → сразу false (без NPE в sendFile). ★ Логируем через log.warn, а не logError(null) — иначе логгер может упасть на t.getMessage()/printStackTrace() при null Throwable. ★ deleteSrc + cache-guard сохранены для одиночных временных файлов (галерея/камера). Для zip, собранного через zipDirectory, удаление делается вызывающим кодом БЕЗУСЛОВНО (см. handlePickedPaths) — потому что sendFile копирует синхронно, а расположение zip не гарантировано внутри cache.
+   */
+  private boolean sendAttachmentCore(AttachmentInfo info, File src, boolean deleteSrc) {
+    if (conversationId == null) {
+      log.warn("sendAttachmentCore: conversationId == null — пропуск");
+      return false;
+    }
+    try {
+      String id = MessageCommands.sendFile(this, conversationId, info, sCallId);
+      if (id == null)
+        return false;
+      if (deleteSrc && src != null && src.exists()
+          && src.getAbsolutePath().startsWith(getCacheDir().getAbsolutePath()))
+        src.delete();
+      return true;
+    } catch (Exception e) {
+      logError("sendAttachmentCore", e);
+      return false;
+    }
+  }
+
+  private void handlePickedPaths(List<String> paths) {
     if (conversationId == null) {
       toast("Чат не готов");
       return;
     }
     chatExecutor.execute(() -> {
-      try {
-        File src = new File(path);
-        if (!src.exists() || !src.isFile()) {
-          chatUi.post(() -> toast("Файл недоступен"));
-          return;
+      int sent = 0, failed = 0;
+      for (String p : paths) {
+        File f = new File(p);
+        if (!f.exists()) {
+          failed++;
+          continue;
         }
-        long actualSize = src.length();
-        if (actualSize <= 0) {
-          chatUi.post(() -> toast("Пустой файл"));
-          return;
+        try {
+          if (f.isDirectory()) {
+            File zip = AttachmentStorage.zipDirectory(this, f);
+            if (zip == null || zip.length() > MessageCommands.MAX_ATTACHMENT_BYTES) {
+              if (zip != null)
+                zip.delete();
+              failed++;
+              continue;
+            }
+            AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(), f.getName() + ".zip",
+                "application/zip", zip.length());
+            boolean ok = sendAttachmentCore(info, zip, true);
+            if (ok)
+              sent++;
+            else
+              failed++;
+            // ★ zip — наш временный артефакт. sendFile копирует СИНХРОННО,
+            // поэтому удаляем безусловно: cache-guard внутри core мог не
+            // сработать, если zipDirectory кладёт zip вне getCacheDir().
+            if (zip.exists())
+              zip.delete();
+          } else {
+            if (f.length() > MessageCommands.MAX_ATTACHMENT_BYTES) {
+              failed++;
+              continue;
+            }
+            AttachmentInfo info = new AttachmentInfo(f.getAbsolutePath(), f.getName(),
+                AttachmentInfo.guessMimeByName(f.getName()), f.length());
+            if (sendAttachmentCore(info, f, false))
+              sent++;
+            else
+              failed++;
+          }
+        } catch (Exception e) {
+          logError("handlePickedPaths", e);
+          failed++;
         }
-        if (actualSize > MessageCommands.MAX_ATTACHMENT_BYTES) {
-          chatUi.post(() -> toast("Файл слишком большой"));
-          return;
-        }
-        AttachmentInfo info = new AttachmentInfo(src.getAbsolutePath(),
-            name != null ? name : src.getName(),
-            mime != null ? mime : AttachmentInfo.guessMimeByName(src.getName()), actualSize);
-        sendAttachmentToChat(info, src, false);
-      } catch (Exception e) {
-        logError("handlePickedPathForChat", e);
-        chatUi.post(() -> toast("Ошибка: " + e.getMessage()));
       }
+      final int fs = sent, ff = failed;
+      chatUi.post(() -> {
+        toast("📎 Отправлено: " + fs + (ff > 0 ? ", ошибок: " + ff : ""));
+        reloadChat();
+      });
     });
   }
 
