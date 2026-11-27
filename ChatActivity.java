@@ -51,6 +51,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import com.my.mealse.filemanager.ui.FileManagerActivity;
 
+import android.os.StatFs;
+
 /**
  * Экран переписки.
  *
@@ -226,39 +228,46 @@ public class ChatActivity extends BaseActivity {
         try {
           if (f.isDirectory()) {
             File zip = AttachmentStorage.zipDirectory(this, f);
-            if (zip == null || zip.length() > MessageCommands.MAX_ATTACHMENT_BYTES) {
-              if (zip != null)
-                zip.delete();
+            if (zip == null) {
+              failed++;
+              continue;
+            }
+            if (zip.length() > MessageCommands.MAX_ATTACHMENT_BYTES_TEXT) {
+              zip.delete();
               failed++;
               continue;
             }
             AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(), f.getName() + ".zip",
                 "application/zip", zip.length());
-            // ★ deleteSrc=false: владелец очистки — этот код (см. ниже),
-            // а не sendAttachmentCore. sendFile копирует СИНХРОННО, поэтому
-            // удалять zip можно сразу после возврата.
             boolean ok = sendAttachmentCore(info, zip, false);
             if (ok)
               sent++;
             else
               failed++;
-            // ★ Безусловное удаление: cache-guard внутри core мог не сработать,
-            // если AttachmentStorage.zipDirectory кладёт zip вне getCacheDir().
-            // Иначе временный архив остаётся навсегда → утечка места.
+            // ★ наш временный архив; sendFile копирует СИНХРОННО → удаляем безусловно.
             if (zip.exists())
               zip.delete();
           } else {
             long size = f.length();
-            if (size <= 0 || size > MessageCommands.MAX_ATTACHMENT_BYTES) {
+            if (size <= 0) {
+              failed++;
+              continue;
+            }
+            if (size > MessageCommands.MAX_ATTACHMENT_BYTES_TEXT) {
               failed++;
               continue;
             }
             AttachmentInfo info = new AttachmentInfo(f.getAbsolutePath(), f.getName(),
                 AttachmentInfo.guessMimeByName(f.getName()), size);
-            if (sendAttachmentCore(info, f, false))
+            boolean ourTemp = f.getAbsolutePath().startsWith(getCacheDir().getAbsolutePath());
+            // ★ deleteSrc=false + безусловная очистка ourTemp ниже — чистим и при неудаче.
+            boolean ok = sendAttachmentCore(info, f, false);
+            if (ok)
               sent++;
             else
               failed++;
+            if (ourTemp && f.exists())
+              f.delete();
           }
         } catch (Exception e) {
           log.logError("handlePickedPaths", e);
@@ -308,6 +317,16 @@ public class ChatActivity extends BaseActivity {
       try {
         String name = queryDisplayName(uri);
         String mime = getContentResolver().getType(uri);
+
+        // ★ размер ДО копирования + место в cache (иначе IOException на полпути).
+        long declaredSize = querySize(uri);
+        long avail = cacheAvailableBytes();
+        long need = (declaredSize > 0 ? declaredSize : 0) + (16L * 1024 * 1024);
+        if (avail > 0 && avail < need) {
+          ui.post(() -> toast("Мало места в кэше: нужно ~" + AttachmentInfo.formatSize(need)));
+          return;
+        }
+
         File tmp = new File(getCacheDir(),
             "attach_" + System.currentTimeMillis() + "_" + sanitize(name));
         try (InputStream in = getContentResolver().openInputStream(uri);
@@ -321,16 +340,13 @@ public class ChatActivity extends BaseActivity {
         }
         long size = tmp.length();
         if (size <= 0) {
-          // noinspection ResultOfMethodCallIgnored
           tmp.delete();
           ui.post(() -> toast("Пустой файл"));
           return;
         }
-        if (size > MessageCommands.MAX_ATTACHMENT_BYTES) {
-          // noinspection ResultOfMethodCallIgnored
+        if (size > MessageCommands.MAX_ATTACHMENT_BYTES_TEXT) {
           tmp.delete();
-          ui.post(() -> toast("Файл слишком большой (" + AttachmentInfo.formatSize(size) + " > "
-              + AttachmentInfo.formatSize(MessageCommands.MAX_ATTACHMENT_BYTES) + ")"));
+          ui.post(() -> toast("Файл слишком большой (" + AttachmentInfo.formatSize(size) + ")"));
           return;
         }
         AttachmentInfo info = new AttachmentInfo(tmp.getAbsolutePath(), name, mime, size);
@@ -352,16 +368,13 @@ public class ChatActivity extends BaseActivity {
     }
     long size = f.length();
     if (size <= 0) {
-      // noinspection ResultOfMethodCallIgnored
       f.delete();
       toast("Пустой файл");
       return;
     }
-    if (size > MessageCommands.MAX_ATTACHMENT_BYTES) {
-      // noinspection ResultOfMethodCallIgnored
+    if (size > MessageCommands.MAX_ATTACHMENT_BYTES_TEXT) {
       f.delete();
-      toast("Файл слишком большой (" + AttachmentInfo.formatSize(size) + " > "
-          + AttachmentInfo.formatSize(MessageCommands.MAX_ATTACHMENT_BYTES) + ")");
+      toast("Файл слишком большой (" + AttachmentInfo.formatSize(size) + ")");
       return;
     }
     String mime = AttachmentInfo.guessMimeByName(f.getName());
@@ -799,7 +812,7 @@ public class ChatActivity extends BaseActivity {
       }
     }).setNegativeButton("Отмена", null).show();
   }
-  
+
   private void pickFromAppManager() {
     try {
       Intent i = new Intent(this, com.my.mealse.filemanager.ui.FileManagerActivity.class);
@@ -901,6 +914,28 @@ public class ChatActivity extends BaseActivity {
       if (log != null)
         log.error(msg);
       throw new IllegalStateException(msg);
+    }
+  }
+
+  /** Размер URI из OpenableColumns.SIZE до копирования; -1 если провайдер не отдал. */
+  private long querySize(Uri uri) {
+    try (android.database.Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+      if (c != null && c.moveToFirst()) {
+        int idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
+        if (idx >= 0 && !c.isNull(idx))
+          return c.getLong(idx);
+      }
+    } catch (Throwable ignored) {
+    }
+    return -1;
+  }
+
+  /** Свободные байты в cacheDir; -1 при ошибке. */
+  private long cacheAvailableBytes() {
+    try {
+      return new StatFs(getCacheDir().getAbsolutePath()).getAvailableBytes();
+    } catch (Throwable t) {
+      return -1;
     }
   }
 }

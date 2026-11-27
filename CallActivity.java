@@ -1906,7 +1906,7 @@ public class CallActivity extends Activity {
             }
             AttachmentInfo info = new AttachmentInfo(zip.getAbsolutePath(), f.getName() + ".zip",
                 "application/zip", zip.length());
-            boolean ok = sendAttachmentCore(info, zip, true);
+            boolean ok = sendAttachmentCore(info, zip, false);
             if (ok)
               sent++;
             else
@@ -1917,16 +1917,24 @@ public class CallActivity extends Activity {
             if (zip.exists())
               zip.delete();
           } else {
-            if (f.length() > MessageCommands.MAX_ATTACHMENT_BYTES) {
+            long size = f.length();
+            if (size <= 0 || size > MessageCommands.MAX_ATTACHMENT_BYTES) {
               failed++;
               continue;
             }
             AttachmentInfo info = new AttachmentInfo(f.getAbsolutePath(), f.getName(),
-                AttachmentInfo.guessMimeByName(f.getName()), f.length());
-            if (sendAttachmentCore(info, f, false))
+                AttachmentInfo.guessMimeByName(f.getName()), size);
+            // ★ Наш временный файл (pick_zip из менеджера) — в cacheDir; чистим после
+            // синхронного копирования. Пользовательские файлы (filesDir/external) не трогаем.
+            boolean ourTemp = f.getAbsolutePath().startsWith(getCacheDir().getAbsolutePath());
+            // ★ ОДНА отправка; очисткой ourTemp владеет этот код (и при неудаче тоже).
+            boolean ok = sendAttachmentCore(info, f, false);
+            if (ok)
               sent++;
             else
               failed++;
+            if (ourTemp && f.exists())
+              f.delete(); // наш временный — чистим и при неудаче
           }
         } catch (Exception e) {
           logError("handlePickedPaths", e);

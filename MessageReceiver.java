@@ -317,20 +317,21 @@ public class MessageReceiver extends BroadcastReceiver {
       tracker.toFingerprint = d.toFingerprint;
       tracker.sentAt = d.sentAt;
       tracker.firstAt = now;
+      tracker.lastAt = now;
       tracker.partFile = getPartFile(appCtx, d.messageId, d.fileName);
       CHUNK_TRACKERS.put(d.messageId, tracker);
 
       log.log("handleFileChunk: новый tracker " + shortId(d.messageId) + " (" + d.totalChunks
           + " чанков, " + d.fileSize + "B)");
     } else {
-      // Проверка таймаута
-      if (now - tracker.firstAt > FileChunkProtocol.CHUNK_COLLECT_TIMEOUT_MS) {
-        log.warn("handleFileChunk: таймаут сборки " + shortId(d.messageId) + " (прошло "
-            + (now - tracker.firstAt) + "мс) — удаляю");
+      //long now = System.currentTimeMillis();
+      // ★ таймаут «по простою» вместо «на весь файл»
+      if (now - tracker.lastAt > FileChunkProtocol.CHUNK_COLLECT_TIMEOUT_MS) {
         deletePartFile(tracker, log);
         CHUNK_TRACKERS.remove(d.messageId);
         return;
       }
+      tracker.lastAt = now; // ★ обновляем на каждом чанке (до дедупликации)
 
       // ★ НОВОЕ: если первый чанк пришёл без conversation_id, а этот — с ним,
       // обновляем tracker. Иначе assembleFile создаст PRIVATE вместо CALL.
@@ -603,13 +604,15 @@ public class MessageReceiver extends BroadcastReceiver {
    */
   private static void cleanupStaleTrackers(MealseLogger log) {
     long now = System.currentTimeMillis();
-    for (String msgId : new HashSet<>(CHUNK_TRACKERS.keySet())) {
-      ChunkTracker t = CHUNK_TRACKERS.get(msgId);
-      if (t != null && now - t.firstAt > FileChunkProtocol.CHUNK_COLLECT_TIMEOUT_MS) {
-        log.warn("cleanupStaleTrackers: удаляю " + shortId(msgId) + " (age=" + (now - t.firstAt)
-            + "мс)");
-        deletePartFile(t, log);
-        CHUNK_TRACKERS.remove(msgId);
+    synchronized (CHUNK_TRACKERS) {
+      java.util.Iterator<java.util.Map.Entry<String, ChunkTracker>> it = CHUNK_TRACKERS.entrySet()
+          .iterator();
+      while (it.hasNext()) {
+        ChunkTracker t = it.next().getValue();
+        if (t != null && now - t.lastAt > FileChunkProtocol.CHUNK_COLLECT_TIMEOUT_MS) {
+          deletePartFile(t, log);
+          it.remove();
+        }
       }
     }
   }
@@ -636,6 +639,7 @@ public class MessageReceiver extends BroadcastReceiver {
     String toFingerprint;
     long sentAt;
     long firstAt;
+    long lastAt;
     File partFile;
     final Set<Integer> received = new HashSet<>();
   }

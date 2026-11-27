@@ -56,7 +56,12 @@ public final class MessageCommands {
    *
    * Комментарий «// 10 МБ» в старом коде был неверным — константа была 50 МБ, а UI/документация говорили 10 МБ. Теперь всё выровнено по 20 МБ.
    */
-  public static final long MAX_ATTACHMENT_BYTES = 20L * 1024 * 1024;
+  /** Политика: чат звонка — лёгкие вложения. */
+  public static final long MAX_ATTACHMENT_BYTES_CALL = 20L * 1024 * 1024;
+  /** Политика: текстовый чат и «Отправить в чат» из менеджера — технический потолок. */
+  public static final long MAX_ATTACHMENT_BYTES_TEXT = 8L * 1024 * 1024 * 1024; // 8 ГБ
+  /** Legacy-алиас: только для чата звонка. В новом коде использовать _CALL/_TEXT. */
+  public static final long MAX_ATTACHMENT_BYTES = MAX_ATTACHMENT_BYTES_CALL;
 
   private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(r -> {
     Thread t = new Thread(r, "MessengerCommands");
@@ -151,10 +156,18 @@ public final class MessageCommands {
     return messageId;
   }
 
+  /** Текстовый чат / «Отправить в чат» из менеджера — без искусственного лимита (8 ГБ). */
   @Nullable
   public static String sendFile(@NonNull Context context, @NonNull String conversationId,
       @NonNull AttachmentInfo attachment) {
-    return sendFile(context, conversationId, attachment, null);
+    return sendFile(context, conversationId, attachment, null, MAX_ATTACHMENT_BYTES_TEXT);
+  }
+
+  /** Чат звонка — лимит 20 МБ. Единственный вызов с callId — из CallActivity. */
+  @Nullable
+  public static String sendFile(@NonNull Context context, @NonNull String conversationId,
+      @NonNull AttachmentInfo attachment, @Nullable String callId) {
+    return sendFile(context, conversationId, attachment, callId, MAX_ATTACHMENT_BYTES_CALL);
   }
 
   // ============================================================
@@ -182,7 +195,7 @@ public final class MessageCommands {
    */
   @Nullable
   public static String sendFile(@NonNull Context context, @NonNull String conversationId,
-      @NonNull AttachmentInfo attachment, @Nullable String callId) {
+      @NonNull AttachmentInfo attachment, @Nullable String callId, long maxBytes) {
     if (conversationId == null || conversationId.isEmpty())
       return null;
     if (attachment == null)
@@ -195,13 +208,16 @@ public final class MessageCommands {
       log.warn("sendFile: вложение не готово: " + attachment);
       return null;
     }
-    if (attachment.getSizeBytes() > MAX_ATTACHMENT_BYTES) {
-      log.warn("sendFile: файл больше лимита");
+    // ★ Единственная проверка размера — по явному лимиту (политика контекста:
+    // 3-арг. sendFile → MAX_ATTACHMENT_BYTES_TEXT, 4-арг. → MAX_ATTACHMENT_BYTES_CALL).
+    if (attachment.getSizeBytes() > maxBytes) {
+      log.warn("sendFile: размер " + attachment.getSizeBytes() + " > лимита " + maxBytes
+          + " (callId=" + (callId != null ? "set" : "null") + ")");
       return null;
     }
 
     File srcFile = attachment.getLocalFile();
-    if (srcFile == null) {
+    if (srcFile == null || !srcFile.exists()) {
       log.warn("sendFile: исходный файл исчез " + attachment.getLocalPath());
       return null;
     }
@@ -213,6 +229,25 @@ public final class MessageCommands {
     if (conv == null) {
       log.warn("sendFile: диалог не найден " + conversationId + " — файл не копируем");
       return null;
+    }
+
+    // ★ НОВОЕ: StatFs по ЦЕЛЕВОЙ папке — ПОСЛЕ проверки диалога, чтобы
+    // getConversationDir(convId) не создавал каталог-сироту для невалидного convId.
+    // need = length + запас (НЕ 2*length): srcFile уже занимает место и
+    // исключён из getAvailableBytes(); для копии нужен ещё один length.
+    try {
+      File targetDir = AttachmentStorage.getConversationDir(appCtx, conversationId);
+      android.os.StatFs st = new android.os.StatFs(targetDir.getAbsolutePath());
+      long need = srcFile.length() + (16L * 1024 * 1024);
+      long avail = st.getAvailableBytes();
+      if (avail < need) {
+        log.warn("sendFile: мало места в " + targetDir + ": avail=" + avail + ", need=" + need);
+        return null;
+      }
+    } catch (Exception e) {
+      // StatFs может бросить на экзотических ФС — не блокируем отправку,
+      // копия всё равно упадёт с IOException, если места нет.
+      log.warn("sendFile: StatFs failed: " + e.getMessage());
     }
 
     String messageId = UUID.randomUUID().toString();

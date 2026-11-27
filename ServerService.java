@@ -93,7 +93,8 @@ public class ServerService extends Service {
   /**
    * ★ Шаг 16.8.5: лимит raw-файла для /signal/file. Синхронизирован с FileMessageSender.MAX_FILE_SIZE.
    */
-  private static final long MAX_FILE_SIZE = 20L * 1024 * 1024;
+  /** ★ 8 ГБ. handleFileRoute уже стримит (readBodyToFile, 64 КБ). BREAKING: обновить обе стороны. */
+private static final long MAX_FILE_SIZE = 8L * 1024 * 1024 * 1024;
 
   /** Лимит тела прокси-запроса. */
   private static final int MAX_PROXY_BODY_SIZE = 20 * 1024 * 1024;

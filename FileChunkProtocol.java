@@ -54,7 +54,10 @@ public final class FileChunkProtocol {
   public static final long CHUNK_COLLECT_TIMEOUT_MS = 120_000L;
 
   /** ★ Максимальный размер файла для чанков (синхронизирован с FileMessageSender.MAX_FILE_SIZE). */
-  public static final long MAX_FILE_SIZE = 20L * 1024 * 1024;
+  /**
+   * ★ 8 ГБ, синхронно с HTTP-путём. ⚠ BREAKING CHANGE ПРОТОКОЛА: приёмник со старым лимитом отклонит чанки. Требуется обновление ОБЕИХ сторон.
+   */
+  public static final long MAX_FILE_SIZE = 8L * 1024 * 1024 * 1024;
 
   private static final Gson GSON = new Gson();
 
