@@ -4,11 +4,16 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.text.Editable;
+import android.text.Spanned;
 import android.text.TextWatcher;
+import android.text.style.AbsoluteSizeSpan;
+import android.util.TypedValue;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.View;
 import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.ScrollView;
@@ -37,7 +42,9 @@ import java.util.Locale;
  *
  * Функции:
  *   - Просмотр / редактирование .txt / .json / .xml / .md / .log.
- *   - Номера строк.
+ *   - Номера строк (тумблер в меню, персист в SharedPreferences).
+ *   - Размер шрифта: глобальный (меню → персист) и per-selection
+ *     (только отображение в сессии; в .txt не сохраняется).
  *   - Сохранение / Сохранить как / Переименовать / Поиск.
  *   - Информация о файле.
  *   - Read-only режим через EXTRA_READ_ONLY.
@@ -58,6 +65,11 @@ public class MAS_TextEditor extends BaseActivity {
     private static final int MAX_FILE_SIZE_MB = 5;
     private static final int MAX_CHARS_FOR_LINE_NUMBERS = 200_000;
 
+    // ★ НОВОЕ: SharedPreferences для персиста настроек редактора
+    private static final String PREFS = "mealse_editor_prefs";
+    private static final String KEY_FONT_SIZE = "font_size_sp";
+    private static final String KEY_LINE_NUMBERS = "show_line_numbers";
+
     private Toolbar toolbar;
     private TextView lineNumbers;
     private EditText content;
@@ -68,6 +80,12 @@ public class MAS_TextEditor extends BaseActivity {
     private boolean readOnly;
     private boolean isModified;
     private MealseLogger log;
+
+    // ★ НОВОЕ: состояние редактора
+    private SharedPreferences prefs;
+    private int currentFontSize = 14;
+    private boolean showLineNumbers = true;
+    private boolean spanWarnShown = false;
 
     // ============================================================
     //  Статические методы запуска
@@ -150,7 +168,15 @@ public class MAS_TextEditor extends BaseActivity {
             content.setFocusableInTouchMode(true);
         }
 
-        content.setTextSize(14);
+        // ★ НОВОЕ: настройки из prefs + синхронизация размеров поля и колонки
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        currentFontSize = prefs.getInt(KEY_FONT_SIZE, 14);
+        showLineNumbers = prefs.getBoolean(KEY_LINE_NUMBERS, true);
+
+        content.setTextSize(TypedValue.COMPLEX_UNIT_SP, currentFontSize);
+        lineNumbers.setTextSize(TypedValue.COMPLEX_UNIT_SP, currentFontSize);
+        applyLineNumbersVisibility();
+
         content.setHorizontallyScrolling(false);
 
         loadFile();
@@ -235,6 +261,7 @@ public class MAS_TextEditor extends BaseActivity {
 
     private void updateLineNumbers() {
         if (lineNumbers == null || content == null) return;
+        if (!showLineNumbers) return; // ★ скрыта — не строим строку на каждый keystroke
         String text = content.getText().toString();
         if (text.length() > MAX_CHARS_FOR_LINE_NUMBERS) {
             lineNumbers.setText("...");
@@ -273,6 +300,23 @@ public class MAS_TextEditor extends BaseActivity {
         if (save != null) save.setVisible(!readOnly);
         if (saveAs != null) saveAs.setVisible(true);
         if (rename != null) rename.setVisible(!readOnly);
+
+        // ★ нумерация: галочка по состоянию
+        MenuItem ln = menu.findItem(R.id.te_action_line_numbers);
+        if (ln != null) ln.setChecked(showLineNumbers);
+
+        // ★ размер: явно ставим/снимаем галочки ВСЕХ пресетов —
+        //   иначе при кастомном размере висит stale-галочка последнего пресета.
+        MenuItem fs = menu.findItem(R.id.te_action_font_size);
+        if (fs != null && fs.hasSubMenu()) {
+            Menu sub = fs.getSubMenu();
+            int curId = idForFontSize(currentFontSize);
+            for (int i = 0; i < sub.size(); i++) {
+                MenuItem mi = sub.getItem(i);
+                if (mi.getItemId() == R.id.te_font_custom) continue;
+                mi.setChecked(curId != 0 && mi.getItemId() == curId);
+            }
+        }
         return super.onPrepareOptionsMenu(menu);
     }
 
@@ -285,7 +329,128 @@ public class MAS_TextEditor extends BaseActivity {
         if (id == R.id.te_action_info) { showInfo(); return true; }
         if (id == R.id.te_action_save_as) { askSaveAs(); return true; }
         if (id == R.id.te_action_rename) { askRename(); return true; }
+
+        // ★ НОВОЕ — до return super
+        if (id == R.id.te_action_line_numbers) { toggleLineNumbers(); return true; }
+        if (id == R.id.te_font_custom) { askCustomFontSize(); return true; }
+        int sp = fontSizeForId(id);
+        if (sp > 0) { applyChosenSize(sp); return true; }
+
         return super.onOptionsItemSelected(item);
+    }
+
+    // ================= Нумерация =================
+
+    private void toggleLineNumbers() {
+        showLineNumbers = !showLineNumbers;
+        prefs.edit().putBoolean(KEY_LINE_NUMBERS, showLineNumbers).apply();
+        applyLineNumbersVisibility();
+        invalidateOptionsMenu();
+    }
+
+    private void applyLineNumbersVisibility() {
+        lineNumbers.setVisibility(showLineNumbers ? View.VISIBLE : View.GONE);
+        if (showLineNumbers) updateLineNumbers();
+    }
+
+    // ================= Размер шрифта =================
+
+    /** Диспетчер: есть выделение → span на выделение; иначе → глобальный размер. */
+    private void applyChosenSize(int sp) {
+        if (sp < 8 || sp > 72) { toast("Размер 8–72 sp"); return; }
+        if (content.hasSelection()
+                && content.getSelectionStart() != content.getSelectionEnd()) {
+            applySizeToSelection(sp);
+        } else {
+            applyGlobalFontSize(sp);
+        }
+        invalidateOptionsMenu();
+    }
+
+    private void applyGlobalFontSize(int sp) {
+        currentFontSize = sp;
+        content.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        lineNumbers.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
+        prefs.edit().putInt(KEY_FONT_SIZE, sp).apply();
+
+        // ★ Сброс всех per-selection spans: смена глобального размера
+        //   возвращает весь текст к единому кеглю (иначе часть останется старого).
+        Editable ed = content.getText();
+        AbsoluteSizeSpan[] spans = ed.getSpans(0, ed.length(), AbsoluteSizeSpan.class);
+        for (AbsoluteSizeSpan s : spans) ed.removeSpan(s);
+
+        updateLineNumbers();
+    }
+
+    /**
+     * ★ Размер выделенного текста. Plain-text сохранение spans не пишет —
+     * только отображение в сессии (тост один раз).
+     */
+    private void applySizeToSelection(int sp) {
+        int a = content.getSelectionStart(), b = content.getSelectionEnd();
+        if (a < 0 || b < 0 || a == b) return;
+        if (a > b) { int t = a; a = b; b = t; }
+        Editable ed = content.getText();
+        // прежние размерные spans в диапазоне убираем (упрощённо — целиком,
+        // вложенная тонкая разметка схлопывается)
+        AbsoluteSizeSpan[] old = ed.getSpans(a, b, AbsoluteSizeSpan.class);
+        for (AbsoluteSizeSpan s : old) ed.removeSpan(s);
+
+        // ★ ФИКС fontScale: AbsoluteSizeSpan(sp, true) — это dp БЕЗ fontScale.
+        //   Конвертируем sp→px тем же путём, что setTextSize(SP) —
+        //   выделение совпадает с окружающим текстом при любом fontScale.
+        int px = Math.round(TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_SP, sp, getResources().getDisplayMetrics()));
+        ed.setSpan(new AbsoluteSizeSpan(px, false), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+
+        if (!spanWarnShown) {
+            spanWarnShown = true;
+            toast("Размер выделенного — только на экране; в .txt не сохраняется");
+        }
+    }
+
+    private void askCustomFontSize() {
+        EditText input = new EditText(this);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        input.setFilters(new android.text.InputFilter[]{
+                new android.text.InputFilter.LengthFilter(2)});
+        input.setText(String.valueOf(currentFontSize));
+        input.setSelection(0, input.getText().length());
+        new AlertDialog.Builder(this).setTitle("Размер шрифта (8–72)")
+                .setView(input)
+                .setPositiveButton("OK", (d, w) -> {
+                    try {
+                        applyChosenSize(Integer.parseInt(input.getText().toString().trim()));
+                    } catch (Exception e) { toast("Введите число"); }
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+    }
+
+    private static int fontSizeForId(int id) {
+        if (id == R.id.te_font_10) return 10;
+        if (id == R.id.te_font_12) return 12;
+        if (id == R.id.te_font_14) return 14;
+        if (id == R.id.te_font_16) return 16;
+        if (id == R.id.te_font_18) return 18;
+        if (id == R.id.te_font_20) return 20;
+        if (id == R.id.te_font_24) return 24;
+        if (id == R.id.te_font_28) return 28;
+        return -1;
+    }
+
+    private static int idForFontSize(int sp) {
+        switch (sp) {
+            case 10: return R.id.te_font_10;
+            case 12: return R.id.te_font_12;
+            case 14: return R.id.te_font_14;
+            case 16: return R.id.te_font_16;
+            case 18: return R.id.te_font_18;
+            case 20: return R.id.te_font_20;
+            case 24: return R.id.te_font_24;
+            case 28: return R.id.te_font_28;
+            default: return 0;
+        }
     }
 
     // ============================================================

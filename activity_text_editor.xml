@@ -12,32 +12,36 @@
         android:background="#16213e"
         android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar" />
 
-    <LinearLayout
+    <!-- ★ колонка + поле в ОДНОМ ScrollView — номера скроллятся вместе с текстом -->
+    <ScrollView
+        android:id="@+id/te_scroll"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="horizontal">
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:scrollbars="vertical">
 
-        <TextView
-            android:id="@+id/te_line_numbers"
-            android:layout_width="42dp"
-            android:layout_height="match_parent"
-            android:background="#0f3460"
-            android:gravity="top|end"
-            android:padding="12dp"
-            android:textColor="#88ccff"
-            android:textSize="12sp"
-            android:fontFamily="monospace" />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
 
-        <ScrollView
-            android:id="@+id/te_scroll"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:scrollbars="vertical">
+            <TextView
+                android:id="@+id/te_line_numbers"
+                android:layout_width="wrap_content"
+                android:minWidth="42dp"
+                android:layout_height="match_parent"
+                android:background="#0f3460"
+                android:gravity="top|end"
+                android:padding="8dp"
+                android:textColor="#88ccff"
+                android:textSize="14sp"
+                android:fontFamily="monospace" />
 
             <EditText
                 android:id="@+id/te_content"
-                android:layout_width="match_parent"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:background="@null"
                 android:gravity="top"
@@ -50,8 +54,7 @@
                 android:imeOptions="actionNone"
                 android:scrollbars="vertical" />
 
-        </ScrollView>
+        </LinearLayout>
+    </ScrollView>
 
-    </LinearLayout>
-
-</LinearLayout>nearLayout>
+</LinearLayout>

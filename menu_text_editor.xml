@@ -30,4 +30,49 @@
         android:title="✏ Переименовать"
         app:showAsAction="never" />
 
+    <item
+        android:id="@+id/te_action_line_numbers"
+        android:title="🔢 Нумерация строк"
+        android:checkable="true"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/te_action_font_size"
+        android:title="🔠 Размер шрифта"
+        app:showAsAction="never">
+        <menu>
+            <group
+                android:id="@+id/te_font_group"
+                android:checkableBehavior="single">
+                <item
+                    android:id="@+id/te_font_10"
+                    android:title="10 sp" />
+                <item
+                    android:id="@+id/te_font_12"
+                    android:title="12 sp" />
+                <item
+                    android:id="@+id/te_font_14"
+                    android:title="14 sp" />
+                <item
+                    android:id="@+id/te_font_16"
+                    android:title="16 sp" />
+                <item
+                    android:id="@+id/te_font_18"
+                    android:title="18 sp" />
+                <item
+                    android:id="@+id/te_font_20"
+                    android:title="20 sp" />
+                <item
+                    android:id="@+id/te_font_24"
+                    android:title="24 sp" />
+                <item
+                    android:id="@+id/te_font_28"
+                    android:title="28 sp" />
+            </group>
+            <item
+                android:id="@+id/te_font_custom"
+                android:title="Другой размер…" />
+        </menu>
+    </item>
+
 </menu>
